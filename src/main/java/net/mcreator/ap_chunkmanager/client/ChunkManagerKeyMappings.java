@@ -17,6 +17,12 @@ public final class ChunkManagerKeyMappings {
             GLFW.GLFW_KEY_C,
             "key.categories.ap_chunkmanager"
     );
+        public static final KeyMapping TOGGLE_DEBUG_LOGS_KEY = new KeyMapping(
+            "key.ap_chunkmanager.toggle_debug_logs",
+            InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_F8,
+            "key.categories.ap_chunkmanager"
+        );
 
     private ChunkManagerKeyMappings() {
     }
@@ -24,5 +30,6 @@ public final class ChunkManagerKeyMappings {
     @SubscribeEvent
     public static void onRegisterKeyMappings(RegisterKeyMappingsEvent event) {
         event.register(OPEN_FULLMAP_KEY);
+        event.register(TOGGLE_DEBUG_LOGS_KEY);
     }
 }

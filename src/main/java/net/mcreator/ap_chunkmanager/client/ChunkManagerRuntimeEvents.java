@@ -1,11 +1,15 @@
 package net.mcreator.ap_chunkmanager.client;
 
+import com.mojang.blaze3d.platform.Window;
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.math.Axis;
 import net.mcreator.ap_chunkmanager.APChunkManagerMod;
+import net.mcreator.ap_chunkmanager.network.RequestMapTileDataPacket;
 import net.minecraft.core.BlockPos;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 import net.minecraft.world.item.MapItem;
@@ -26,9 +30,19 @@ import java.util.Map;
 @Mod.EventBusSubscriber(modid = APChunkManagerMod.MOD_ID, value = Dist.CLIENT, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class ChunkManagerRuntimeEvents {
     private static final int ROWS_PER_UPDATE = 8;
+    private static final long TILE_REQUEST_COOLDOWN_MS = 700L;
+    private static final byte HUD_MAP_SCALE = 0;
+    private static final int HUD_MAX_TILES_PER_AXIS = 5;
+    private static final int HUD_MAX_TOTAL_TILES = 25;
+    private static final double HUD_TILE_PADDING_PIXELS = 2.0;
+    private static final double HUD_TILE_OVERLAP_PIXELS = 1.0;
+    private static final int HUD_FALLBACK_TEXTURE_SIZE = 256;
+    private static final int HUD_FALLBACK_WRAP_BLOCKS = 8192;
     private static final ResourceLocation COMPASS_TEXTURE = new ResourceLocation("minecraft", "textures/item/compass_00.png");
+    private static final ResourceLocation FULLMAP_FALLBACK_TEXTURE = new ResourceLocation("minecraft", "textures/map/map_background_checkerboard.png");
     private static final Map<Long, MapScanState> SCAN_STATE_BY_MAP = new HashMap<>();
     private static final Map<Integer, MapItemSavedData> VIRTUAL_MAPS = new HashMap<>();
+    private static final Map<Integer, Long> LAST_TILE_REQUEST_MS = new HashMap<>();
 
     private ChunkManagerRuntimeEvents() {
     }
@@ -51,6 +65,11 @@ public final class ChunkManagerRuntimeEvents {
                 mc.setScreen(new ChunkManagerMapScreen());
             }
         }
+
+        while (ChunkManagerKeyMappings.TOGGLE_DEBUG_LOGS_KEY.consumeClick()) {
+            boolean enabled = ChunkManagerClientState.toggleDebugLogs();
+            mc.player.displayClientMessage(Component.literal("ChunkManager debug logs: " + (enabled ? "ON" : "OFF")), true);
+        }
     }
 
     @SubscribeEvent
@@ -64,18 +83,6 @@ public final class ChunkManagerRuntimeEvents {
             return;
         }
 
-        byte schaal = 0;
-        double playerX = mc.player.getX();
-        double playerZ = mc.player.getZ();
-        int mapId = calculateVirtualMapId(playerX, playerZ, schaal);
-        MapItemSavedData mapData = getVirtualMapData(mc, playerX, playerZ, schaal, mapId);
-        if (mapData == null) {
-            return;
-        }
-
-        updateMapColorsClientSide(mc, mapData);
-        mc.gameRenderer.getMapRenderer().update(mapId, mapData);
-
         int minimapSize = ChunkManagerClientState.getMinimapSize();
         int mapX = 10;
         int mapY = 10;
@@ -83,28 +90,194 @@ public final class ChunkManagerRuntimeEvents {
 
         event.getGuiGraphics().fill(mapX - pad, mapY - pad, mapX + minimapSize + pad, mapY + minimapSize + pad, 0x90303030);
 
-        PoseStack poseStack = event.getGuiGraphics().pose();
-        poseStack.pushPose();
-        poseStack.translate(mapX, mapY, 100.0f);
-        float hudScale = minimapSize / 128.0f;
-        poseStack.scale(hudScale, hudScale, 1.0f);
+        int scaleMultiplier = 1 << HUD_MAP_SCALE;
+        double worldSpan = 128.0 * scaleMultiplier;
+        double playerX = mc.player.getX();
+        double playerZ = mc.player.getZ();
+        double worldLeft = playerX - (worldSpan / 2.0);
+        double worldTop = playerZ - (worldSpan / 2.0);
+        double pixelsPerBlock = minimapSize / Math.max(1.0, worldSpan);
 
+        renderHudMapPass(event.getGuiGraphics(), mc, mapX, mapY, minimapSize, worldLeft, worldTop, worldSpan, pixelsPerBlock, HUD_MAP_SCALE);
+        renderHudOverlayPass(event.getGuiGraphics(), mc, mapX, mapY, minimapSize, worldLeft, worldTop, pixelsPerBlock);
+    }
+
+    private static void renderHudMapPass(net.minecraft.client.gui.GuiGraphics guiGraphics, Minecraft mc, int mapX, int mapY, int minimapSize,
+            double worldLeft, double worldTop, double worldSpan, double pixelsPerBlock, byte scale) {
+        guiGraphics.flush();
+        beginHudScissor(mc, mapX, mapY, minimapSize);
+        try {
+            renderHudStitchedTiles(guiGraphics, mc, mapX, mapY, minimapSize, worldLeft, worldTop, worldSpan, pixelsPerBlock, scale);
+        } finally {
+            RenderSystem.disableScissor();
+        }
+        guiGraphics.flush();
+    }
+
+    private static void renderHudStitchedTiles(net.minecraft.client.gui.GuiGraphics guiGraphics, Minecraft mc, int mapX, int mapY, int minimapSize,
+            double worldLeft, double worldTop, double worldSpan, double pixelsPerBlock, byte scale) {
+        int blockSize = 128 * (1 << scale);
+        HudTileBounds bounds = calculateHudTileBounds(worldLeft, worldTop, worldSpan, pixelsPerBlock, blockSize);
         MultiBufferSource.BufferSource buffers = mc.renderBuffers().bufferSource();
-        mc.gameRenderer.getMapRenderer().render(
-                poseStack,
-                buffers,
-                mapId,
-                mapData,
-                true,
-                15728880
-        );
-        buffers.endBatch();
-        poseStack.popPose();
+        int renderedTiles = 0;
 
-        renderOverlayLayer(event.getGuiGraphics(), graphics -> {
-            renderHudCompass(graphics, mc, mapX, mapY);
-            renderHudPlayerPointer(graphics, mc, mapData, mapX, mapY, minimapSize);
-        });
+        for (int gridZ = bounds.minGridZ; gridZ <= bounds.maxGridZ; gridZ++) {
+            for (int gridX = bounds.minGridX; gridX <= bounds.maxGridX; gridX++) {
+                if (renderedTiles >= HUD_MAX_TOTAL_TILES) {
+                    break;
+                }
+
+                int tileMinX = gridX * blockSize;
+                int tileMinZ = gridZ * blockSize;
+                double tileCenterX = tileMinX + (blockSize / 2.0);
+                double tileCenterZ = tileMinZ + (blockSize / 2.0);
+
+                int mapId = calculateVirtualMapId(tileCenterX, tileCenterZ, scale);
+                MapItemSavedData mapData = getVirtualMapData(mc, tileCenterX, tileCenterZ, scale, mapId);
+
+                double drawLeft = mapX + ((tileMinX - worldLeft) * pixelsPerBlock) - bounds.tileOverlapPixels;
+                double drawTop = mapY + ((tileMinZ - worldTop) * pixelsPerBlock) - bounds.tileOverlapPixels;
+                double drawRight = mapX + (((tileMinX + blockSize) - worldLeft) * pixelsPerBlock) + bounds.tileOverlapPixels;
+                double drawBottom = mapY + (((tileMinZ + blockSize) - worldTop) * pixelsPerBlock) + bounds.tileOverlapPixels;
+
+                int drawX = Mth.floor(drawLeft - 0.5);
+                int drawY = Mth.floor(drawTop - 0.5);
+                int drawW = Mth.ceil(drawRight + 0.5) - drawX;
+                int drawH = Mth.ceil(drawBottom + 0.5) - drawY;
+                if (drawW <= 0 || drawH <= 0) {
+                    continue;
+                }
+
+                boolean missingData = mapData == null || !hasRenderableData(mapData) || mapId == -1;
+                if (missingData) {
+                    requestVirtualTileData(mc, tileCenterX, tileCenterZ, scale, mapId);
+                    renderHudFallbackTile(guiGraphics, drawX, drawY, drawW, drawH, tileMinX, tileMinZ, blockSize);
+                    renderedTiles++;
+                    continue;
+                }
+
+                updateMapColorsClientSide(mc, mapData);
+                mc.gameRenderer.getMapRenderer().update(mapId, mapData);
+
+                PoseStack poseStack = guiGraphics.pose();
+                poseStack.pushPose();
+                poseStack.translate(drawX, drawY, 100.0f);
+                poseStack.scale(drawW / 128.0f, drawH / 128.0f, 1.0f);
+                mc.gameRenderer.getMapRenderer().render(poseStack, buffers, mapId, mapData, true, 15728880);
+                poseStack.popPose();
+
+                renderedTiles++;
+            }
+
+            if (renderedTiles >= HUD_MAX_TOTAL_TILES) {
+                break;
+            }
+        }
+
+        buffers.endBatch();
+    }
+
+    private static void renderHudFallbackTile(net.minecraft.client.gui.GuiGraphics guiGraphics, int drawX, int drawY, int drawW, int drawH, int tileMinX,
+            int tileMinZ, int blockSize) {
+        float u = (float) (Math.floorMod(tileMinX, HUD_FALLBACK_WRAP_BLOCKS) / (double) HUD_FALLBACK_WRAP_BLOCKS);
+        float v = (float) (Math.floorMod(tileMinZ, HUD_FALLBACK_WRAP_BLOCKS) / (double) HUD_FALLBACK_WRAP_BLOCKS);
+        float uSize = (float) (blockSize / (double) HUD_FALLBACK_WRAP_BLOCKS);
+        float vSize = (float) (blockSize / (double) HUD_FALLBACK_WRAP_BLOCKS);
+        int uWidthPx = Math.max(1, Mth.ceil(uSize * HUD_FALLBACK_TEXTURE_SIZE));
+        int vHeightPx = Math.max(1, Mth.ceil(vSize * HUD_FALLBACK_TEXTURE_SIZE));
+
+        guiGraphics.blit(
+                FULLMAP_FALLBACK_TEXTURE,
+                drawX,
+                drawY,
+                drawW,
+                drawH,
+                u * HUD_FALLBACK_TEXTURE_SIZE,
+                v * HUD_FALLBACK_TEXTURE_SIZE,
+                uWidthPx,
+                vHeightPx,
+                HUD_FALLBACK_TEXTURE_SIZE,
+                HUD_FALLBACK_TEXTURE_SIZE
+        );
+    }
+
+    private static void renderHudOverlayPass(net.minecraft.client.gui.GuiGraphics guiGraphics, Minecraft mc, int mapX, int mapY, int minimapSize,
+            double worldLeft, double worldTop, double pixelsPerBlock) {
+        guiGraphics.flush();
+        RenderSystem.disableDepthTest();
+        PoseStack pose = guiGraphics.pose();
+        pose.pushPose();
+        pose.translate(0.0f, 0.0f, 250.0f);
+
+        try {
+            beginHudScissor(mc, mapX, mapY, minimapSize);
+            try {
+                int centerMapId = calculateVirtualMapId(mc.player.getX(), mc.player.getZ(), HUD_MAP_SCALE);
+                MapItemSavedData centerMapData = getVirtualMapData(mc, mc.player.getX(), mc.player.getZ(), HUD_MAP_SCALE, centerMapId);
+                renderHudPlayerPointer(guiGraphics, mc, centerMapData, mapX, mapY, minimapSize);
+            } finally {
+                RenderSystem.disableScissor();
+            }
+
+            renderHudCompass(guiGraphics, mc, mapX, mapY);
+        } finally {
+            pose.popPose();
+            RenderSystem.enableDepthTest();
+        }
+
+        guiGraphics.flush();
+    }
+
+    private static HudTileBounds calculateHudTileBounds(double worldLeft, double worldTop, double worldSpan, double pixelsPerBlock, int blockSize) {
+        double safePixelsPerBlock = Math.max(0.0001, pixelsPerBlock);
+        double paddingBlocks = Math.max(1.0, HUD_TILE_PADDING_PIXELS / safePixelsPerBlock);
+        double tileOverlapPixels = Mth.clamp(HUD_TILE_OVERLAP_PIXELS, 0.0, Math.max(0.0, blockSize * safePixelsPerBlock * 0.25));
+
+        double paddedWorldLeft = worldLeft - paddingBlocks;
+        double paddedWorldTop = worldTop - paddingBlocks;
+        double paddedWorldRight = worldLeft + worldSpan + paddingBlocks;
+        double paddedWorldBottom = worldTop + worldSpan + paddingBlocks;
+
+        int minGridX = Math.floorDiv(Mth.floor(paddedWorldLeft), blockSize);
+        int minGridZ = Math.floorDiv(Mth.floor(paddedWorldTop), blockSize);
+        int maxGridX = Math.floorDiv(Mth.ceil(paddedWorldRight) - 1, blockSize);
+        int maxGridZ = Math.floorDiv(Mth.ceil(paddedWorldBottom) - 1, blockSize);
+
+        int centerGridX = Math.floorDiv(Mth.floor(worldLeft + (worldSpan / 2.0)), blockSize);
+        int centerGridZ = Math.floorDiv(Mth.floor(worldTop + (worldSpan / 2.0)), blockSize);
+        minGridX = clampGridAxis(minGridX, maxGridX, centerGridX, HUD_MAX_TILES_PER_AXIS, true);
+        maxGridX = clampGridAxis(minGridX, maxGridX, centerGridX, HUD_MAX_TILES_PER_AXIS, false);
+        minGridZ = clampGridAxis(minGridZ, maxGridZ, centerGridZ, HUD_MAX_TILES_PER_AXIS, true);
+        maxGridZ = clampGridAxis(minGridZ, maxGridZ, centerGridZ, HUD_MAX_TILES_PER_AXIS, false);
+
+        return new HudTileBounds(minGridX, minGridZ, maxGridX, maxGridZ, tileOverlapPixels);
+    }
+
+    private static int clampGridAxis(int minGrid, int maxGrid, int centerGrid, int maxTilesAxis, boolean returnMin) {
+        int currentCount = maxGrid - minGrid + 1;
+        if (currentCount <= maxTilesAxis) {
+            return returnMin ? minGrid : maxGrid;
+        }
+
+        int half = maxTilesAxis / 2;
+        int newMin = centerGrid - half;
+        int newMax = newMin + maxTilesAxis - 1;
+        return returnMin ? newMin : newMax;
+    }
+
+    private static void beginHudScissor(Minecraft mc, int mapX, int mapY, int minimapSize) {
+        Window window = mc.getWindow();
+        double guiScale = window.getGuiScale();
+
+        int scissorX = (int) Math.floor(mapX * guiScale);
+        int scissorY = (int) Math.floor(window.getHeight() - ((mapY + minimapSize) * guiScale));
+        int scissorW = Math.max(1, (int) Math.ceil(minimapSize * guiScale));
+        int scissorH = Math.max(1, (int) Math.ceil(minimapSize * guiScale));
+
+        RenderSystem.enableScissor(scissorX, scissorY, scissorW, scissorH);
+    }
+
+    private record HudTileBounds(int minGridX, int minGridZ, int maxGridX, int maxGridZ, double tileOverlapPixels) {
     }
 
     public static MapItemSavedData getVirtualMapData(Minecraft mc, double playerX, double playerZ, byte schaal, int mapId) {
@@ -190,11 +363,79 @@ public final class ChunkManagerRuntimeEvents {
         return calculateBaseMapHash(playerX, playerZ, schaal);
     }
 
+    public static boolean hasRenderableData(MapItemSavedData mapData) {
+        if (mapData == null || mapData.colors == null || mapData.colors.length < (128 * 128)) {
+            return false;
+        }
+
+        int nonZero = 0;
+        for (int z = 0; z < 128; z += 8) {
+            for (int x = 0; x < 128; x += 8) {
+                int idx = x + (z * 128);
+                if (idx < mapData.colors.length && mapData.colors[idx] != 0) {
+                    nonZero++;
+                    if (nonZero >= 3) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    public static void requestVirtualTileData(Minecraft mc, double worldX, double worldZ, byte scale, int mapId) {
+        if (mc == null || mc.player == null || mc.level == null) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        long lastRequest = LAST_TILE_REQUEST_MS.getOrDefault(mapId, 0L);
+        if ((now - lastRequest) < TILE_REQUEST_COOLDOWN_MS) {
+            return;
+        }
+
+        LAST_TILE_REQUEST_MS.put(mapId, now);
+        APChunkManagerMod.NETWORK.sendToServer(new RequestMapTileDataPacket(worldX, worldZ, scale, mapId));
+    }
+
+    public static void applyServerTileData(Minecraft mc, int mapId, int centerX, int centerZ, byte scale, byte[] colors) {
+        if (mc == null || mc.level == null || colors == null || colors.length == 0) {
+            return;
+        }
+
+        MapItemSavedData target = VIRTUAL_MAPS.get(mapId);
+        if (target == null) {
+            target = MapItemSavedData.createFresh(centerX, centerZ, scale, true, true, mc.level.dimension());
+            VIRTUAL_MAPS.put(mapId, target);
+        }
+
+        int copyLength = Math.min(target.colors.length, colors.length);
+        System.arraycopy(colors, 0, target.colors, 0, copyLength);
+        target.setDirty();
+
+        mc.gameRenderer.getMapRenderer().update(mapId, target);
+        LAST_TILE_REQUEST_MS.remove(mapId);
+    }
+
     private static int calculateBaseMapHash(double playerX, double playerZ, byte schaal) {
         int blockSize = 128 * (1 << schaal);
         int gridX = Math.floorDiv((int) playerX, blockSize);
         int gridZ = Math.floorDiv((int) playerZ, blockSize);
-        return Math.abs((gridX * 31 + gridZ) ^ schaal);
+
+        long packed = ((((long) gridX) & 0xffffffffL) << 32)
+                ^ (((long) gridZ) & 0xffffffffL)
+                ^ ((((long) schaal) & 0xffL) << 56);
+
+        // Strong 64-bit mix avoids frequent collisions across scales and far-away grid coordinates.
+        long mixed = packed;
+        mixed ^= (mixed >>> 33);
+        mixed *= 0xff51afd7ed558ccdL;
+        mixed ^= (mixed >>> 33);
+        mixed *= 0xc4ceb9fe1a85ec53L;
+        mixed ^= (mixed >>> 33);
+
+        return (int) (mixed & 0x7fffffff);
     }
 
     public static void updateMapColorsClientSide(Minecraft mc, MapItemSavedData mapData) {
@@ -344,16 +585,6 @@ public final class ChunkManagerRuntimeEvents {
         pose.translate(centerX, centerY, 0.0f);
         pose.mulPose(Axis.ZP.rotationDegrees(rotationDegrees));
         guiGraphics.blit(texture, -halfSize, -halfSize, 0.0f, 0.0f, size, size, size, size);
-        pose.popPose();
-    }
-
-    private static void renderOverlayLayer(net.minecraft.client.gui.GuiGraphics guiGraphics, java.util.function.Consumer<net.minecraft.client.gui.GuiGraphics> renderer) {
-        guiGraphics.flush();
-        PoseStack pose = guiGraphics.pose();
-        pose.pushPose();
-        pose.translate(0.0f, 0.0f, 250.0f);
-        renderer.accept(guiGraphics);
-        guiGraphics.flush();
         pose.popPose();
     }
 

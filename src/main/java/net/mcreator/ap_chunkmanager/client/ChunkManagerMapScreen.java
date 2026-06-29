@@ -1,5 +1,6 @@
 package net.mcreator.ap_chunkmanager.client;
 
+import com.mojang.logging.LogUtils;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.platform.Window;
@@ -14,15 +15,26 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
+import org.slf4j.Logger;
 
 public class ChunkManagerMapScreen extends Screen {
+    private static final Logger LOGGER = LogUtils.getLogger();
     private static final byte MIN_SCALE = 0;
     private static final byte MAX_SCALE = 4;
     private static final double MIN_ZOOM_RADIUS_BLOCKS = 48.0;
     private static final double MAX_ZOOM_RADIUS_BLOCKS = 2048.0;
     private static final double TILE_SELECTION_PADDING_PIXELS = 3.0;
     private static final double TILE_OVERLAP_PIXELS = 1.25;
+    private static final double MAX_DYNAMIC_PADDING_PIXELS = 7.5;
+    private static final double MAX_DYNAMIC_OVERLAP_PIXELS = 4.5;
+    private static final double OVERLAP_QUANTIZATION_PIXELS = 0.25;
+    private static final int MAX_TILES_PER_AXIS = 9;
+    private static final int MAX_TOTAL_TILES = 81;
+    private static final long DEBUG_LOG_INTERVAL_MS = 450L;
+    private static final int FALLBACK_TEXTURE_SIZE = 256;
+    private static final int FALLBACK_WORLD_WRAP_BLOCKS = 8192;
     private static final ResourceLocation COMPASS_TEXTURE = new ResourceLocation("minecraft", "textures/item/compass_00.png");
+    private static final ResourceLocation FULLMAP_FALLBACK_TEXTURE = new ResourceLocation("minecraft", "textures/map/map_background_checkerboard.png");
 
     private byte currentMapScale = 0;
     private int mapX;
@@ -41,6 +53,7 @@ public class ChunkManagerMapScreen extends Screen {
     private double lastWorldTop;
     private double lastWorldSpan;
     private double lastBlocksPerPixel = 1.0;
+    private long lastDebugLogMs;
     private Button gridButton;
     private Button minimapSizeButton;
 
@@ -214,8 +227,8 @@ public class ChunkManagerMapScreen extends Screen {
         lastWorldSpan = worldSpan;
         lastBlocksPerPixel = blocksPerPixel;
 
-        renderMapLayer(guiGraphics, mc, worldLeft, worldTop, worldSpan, pixelsPerBlock);
-        renderTopOverlay(guiGraphics, mc, worldLeft, worldTop, pixelsPerBlock);
+        renderMapPass(guiGraphics, mc, worldLeft, worldTop, worldSpan, pixelsPerBlock);
+        renderOverlayPass(guiGraphics, mc, worldLeft, worldTop, pixelsPerBlock);
 
         int centerVirtualId = ChunkManagerRuntimeEvents.calculateVirtualMapId(centerBlockX, centerBlockZ, currentMapScale);
         guiGraphics.drawString(this.font, "Map ID: " + centerVirtualId, panelX + 12, panelY + 116, 0xFFD7E3F4, false);
@@ -227,32 +240,42 @@ public class ChunkManagerMapScreen extends Screen {
         super.render(guiGraphics, mouseX, mouseY, partialTick);
     }
 
-    private void renderMapLayer(GuiGraphics guiGraphics, Minecraft mc, double worldLeft, double worldTop, double worldSpan, double pixelsPerBlock) {
+    private void renderMapPass(GuiGraphics guiGraphics, Minecraft mc, double worldLeft, double worldTop, double worldSpan, double pixelsPerBlock) {
+        guiGraphics.flush();
         beginMapScissor(mc);
         try {
             renderStitchedMaps(guiGraphics, mc, worldLeft, worldTop, worldSpan, pixelsPerBlock);
         } finally {
             RenderSystem.disableScissor();
         }
+        guiGraphics.flush();
     }
 
     private void renderStitchedMaps(GuiGraphics guiGraphics, Minecraft mc, double worldLeft, double worldTop, double worldSpan, double pixelsPerBlock) {
-        double tileSelectionPaddingBlocks = Math.max(1.0, TILE_SELECTION_PADDING_PIXELS / Math.max(0.0001, pixelsPerBlock));
-        double paddedWorldLeft = worldLeft - tileSelectionPaddingBlocks;
-        double paddedWorldTop = worldTop - tileSelectionPaddingBlocks;
-        double paddedWorldRight = worldLeft + worldSpan + tileSelectionPaddingBlocks;
-        double paddedWorldBottom = worldTop + worldSpan + tileSelectionPaddingBlocks;
         int blockSize = 128 * (1 << currentMapScale);
-        int minGridX = Math.floorDiv(Mth.floor(paddedWorldLeft), blockSize);
-        int minGridZ = Math.floorDiv(Mth.floor(paddedWorldTop), blockSize);
-        int maxGridX = Math.floorDiv(Mth.ceil(paddedWorldRight) - 1, blockSize);
-        int maxGridZ = Math.floorDiv(Mth.ceil(paddedWorldBottom) - 1, blockSize);
-        double tileOverlapPixels = Mth.clamp(TILE_OVERLAP_PIXELS, 0.0, Math.max(0.0, blockSize * pixelsPerBlock * 0.25));
+        TileRenderBounds tileBounds = calculateTileRenderBounds(worldLeft, worldTop, worldSpan, pixelsPerBlock, blockSize);
+        int minGridX = tileBounds.minGridX;
+        int minGridZ = tileBounds.minGridZ;
+        int maxGridX = tileBounds.maxGridX;
+        int maxGridZ = tileBounds.maxGridZ;
+        double tileOverlapPixels = tileBounds.tileOverlapPixels;
+
+        double playerX = mc.player != null ? mc.player.getX() : centerBlockX;
+        double playerZ = mc.player != null ? mc.player.getZ() : centerBlockZ;
+        double cameraOffsetBlocksX = centerBlockX - playerX;
+        double cameraOffsetBlocksZ = centerBlockZ - playerZ;
+        double anchorScreenX = mapX + (mapSize * 0.5) - (cameraOffsetBlocksX * pixelsPerBlock);
+        double anchorScreenY = mapY + (mapSize * 0.5) - (cameraOffsetBlocksZ * pixelsPerBlock);
 
         MultiBufferSource.BufferSource buffers = mc.renderBuffers().bufferSource();
+        int renderedTiles = 0;
 
         for (int gridZ = minGridZ; gridZ <= maxGridZ; gridZ++) {
             for (int gridX = minGridX; gridX <= maxGridX; gridX++) {
+                if (renderedTiles >= MAX_TOTAL_TILES) {
+                    break;
+                }
+
                 int tileMinX = gridX * blockSize;
                 int tileMinZ = gridZ * blockSize;
                 double tileCenterX = tileMinX + (blockSize / 2.0);
@@ -260,26 +283,59 @@ public class ChunkManagerMapScreen extends Screen {
 
                 int mapId = ChunkManagerRuntimeEvents.calculateVirtualMapId(tileCenterX, tileCenterZ, currentMapScale);
                 MapItemSavedData mapData = ChunkManagerRuntimeEvents.getVirtualMapData(mc, tileCenterX, tileCenterZ, currentMapScale, mapId);
-                if (mapData == null) {
+
+                int scaleMultiplier = 1 << currentMapScale;
+                // Vanilla map space: top-left comes from map center minus 64 pixels in map coordinates.
+                double tileWorldLeft = mapData != null ? mapData.centerX - (64.0 * scaleMultiplier) : tileMinX;
+                double tileWorldTop = mapData != null ? mapData.centerZ - (64.0 * scaleMultiplier) : tileMinZ;
+                double tileWorldRight = tileWorldLeft + (128.0 * scaleMultiplier);
+                double tileWorldBottom = tileWorldTop + (128.0 * scaleMultiplier);
+
+                // Player acts as absolute world anchor; tile offsets are projected into screen pixels.
+                double xOffsetPixels = (tileWorldLeft - playerX) * pixelsPerBlock;
+                double yOffsetPixels = (tileWorldTop - playerZ) * pixelsPerBlock;
+                double drawLeft = anchorScreenX + xOffsetPixels - tileOverlapPixels;
+                double drawTop = anchorScreenY + yOffsetPixels - tileOverlapPixels;
+                double drawRight = anchorScreenX + ((tileWorldRight - playerX) * pixelsPerBlock) + tileOverlapPixels;
+                double drawBottom = anchorScreenY + ((tileWorldBottom - playerZ) * pixelsPerBlock) + tileOverlapPixels;
+
+                int drawX = Mth.floor(drawLeft - 0.5);
+                int drawY = Mth.floor(drawTop - 0.5);
+                int drawW = Mth.ceil(drawRight + 0.5) - drawX;
+                int drawH = Mth.ceil(drawBottom + 0.5) - drawY;
+
+                if (drawW <= 0 || drawH <= 0) {
+                    continue;
+                }
+
+                boolean missingData = mapData == null || !ChunkManagerRuntimeEvents.hasRenderableData(mapData);
+                if (missingData || mapId == -1) {
+                    ChunkManagerRuntimeEvents.requestVirtualTileData(mc, tileCenterX, tileCenterZ, currentMapScale, mapId);
+                    renderFullmapFallbackTile(guiGraphics, drawX, drawY, drawW, drawH, tileMinX, tileMinZ, blockSize);
+                    debugTilePlacement(
+                            gridX,
+                            gridZ,
+                            tileWorldLeft,
+                            tileWorldTop,
+                            tileWorldRight,
+                            tileWorldBottom,
+                            drawX,
+                            drawY,
+                            drawW,
+                            drawH,
+                            mapId,
+                            true,
+                            anchorScreenX,
+                            anchorScreenY,
+                            playerX,
+                            playerZ
+                    );
+                    renderedTiles++;
                     continue;
                 }
 
                 ChunkManagerRuntimeEvents.updateMapColorsClientSide(mc, mapData);
                 mc.gameRenderer.getMapRenderer().update(mapId, mapData);
-
-                double drawLeft = mapX + ((tileMinX - worldLeft) * pixelsPerBlock) - tileOverlapPixels;
-                double drawTop = mapY + ((tileMinZ - worldTop) * pixelsPerBlock) - tileOverlapPixels;
-                double drawRight = mapX + (((tileMinX + blockSize) - worldLeft) * pixelsPerBlock) + tileOverlapPixels;
-                double drawBottom = mapY + (((tileMinZ + blockSize) - worldTop) * pixelsPerBlock) + tileOverlapPixels;
-
-                int drawX = Mth.floor(drawLeft);
-                int drawY = Mth.floor(drawTop);
-                int drawW = Mth.ceil(drawRight) - drawX;
-                int drawH = Mth.ceil(drawBottom) - drawY;
-
-                if (drawW <= 0 || drawH <= 0) {
-                    continue;
-                }
 
                 PoseStack pose = guiGraphics.pose();
                 pose.pushPose();
@@ -287,10 +343,93 @@ public class ChunkManagerMapScreen extends Screen {
                 pose.scale(drawW / 128.0f, drawH / 128.0f, 1.0f);
                 mc.gameRenderer.getMapRenderer().render(pose, buffers, mapId, mapData, true, 15728880);
                 pose.popPose();
+
+                debugTilePlacement(
+                    gridX,
+                    gridZ,
+                    tileWorldLeft,
+                    tileWorldTop,
+                    tileWorldRight,
+                    tileWorldBottom,
+                    drawX,
+                    drawY,
+                    drawW,
+                    drawH,
+                    mapId,
+                    false,
+                    anchorScreenX,
+                    anchorScreenY,
+                    playerX,
+                    playerZ
+                );
+                renderedTiles++;
+            }
+
+            if (renderedTiles >= MAX_TOTAL_TILES) {
+                break;
             }
         }
 
         buffers.endBatch();
+    }
+
+    private void renderFullmapFallbackTile(GuiGraphics guiGraphics, int drawX, int drawY, int drawW, int drawH, int tileMinX, int tileMinZ, int blockSize) {
+        float u = (float) (Math.floorMod(tileMinX, FALLBACK_WORLD_WRAP_BLOCKS) / (double) FALLBACK_WORLD_WRAP_BLOCKS);
+        float v = (float) (Math.floorMod(tileMinZ, FALLBACK_WORLD_WRAP_BLOCKS) / (double) FALLBACK_WORLD_WRAP_BLOCKS);
+        float uSize = (float) (blockSize / (double) FALLBACK_WORLD_WRAP_BLOCKS);
+        float vSize = (float) (blockSize / (double) FALLBACK_WORLD_WRAP_BLOCKS);
+        int uWidthPx = Math.max(1, Mth.ceil(uSize * FALLBACK_TEXTURE_SIZE));
+        int vHeightPx = Math.max(1, Mth.ceil(vSize * FALLBACK_TEXTURE_SIZE));
+
+        guiGraphics.blit(
+                FULLMAP_FALLBACK_TEXTURE,
+                drawX,
+                drawY,
+                drawW,
+                drawH,
+                u * FALLBACK_TEXTURE_SIZE,
+                v * FALLBACK_TEXTURE_SIZE,
+                uWidthPx,
+                vHeightPx,
+                FALLBACK_TEXTURE_SIZE,
+                FALLBACK_TEXTURE_SIZE
+        );
+    }
+
+    private void debugTilePlacement(int gridX, int gridZ, double tileWorldLeft, double tileWorldTop, double tileWorldRight, double tileWorldBottom,
+            int drawX, int drawY, int drawW, int drawH, int mapId, boolean fallback, double anchorScreenX, double anchorScreenY, double playerX,
+            double playerZ) {
+        if (!ChunkManagerClientState.isDebugLogsEnabled()) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        if ((now - lastDebugLogMs) < DEBUG_LOG_INTERVAL_MS) {
+            return;
+        }
+        lastDebugLogMs = now;
+
+        LOGGER.info(
+            "[ap_chunkmanager/map-debug] grid=({}, {}) mapId={} scale={} zoomRadius={} fallback={} player=({}, {}) anchor=({}, {}) worldRect=({}, {})-({}, {}) drawRect=({}, {}) {}x{}",
+            gridX,
+            gridZ,
+                mapId,
+                currentMapScale,
+            Mth.floor(zoomRadiusBlocks),
+            fallback,
+            Mth.floor(playerX),
+            Mth.floor(playerZ),
+            Mth.floor(anchorScreenX),
+            Mth.floor(anchorScreenY),
+            Mth.floor(tileWorldLeft),
+            Mth.floor(tileWorldTop),
+            Mth.floor(tileWorldRight),
+            Mth.floor(tileWorldBottom),
+            drawX,
+            drawY,
+            drawW,
+            drawH
+        );
     }
 
     private void renderChunkGrid(GuiGraphics guiGraphics, double worldLeft, double worldTop, double pixelsPerBlock) {
@@ -360,25 +499,90 @@ public class ChunkManagerMapScreen extends Screen {
         guiGraphics.fill(tipX - 2, tipZ - 2, tipX + 2, tipZ + 2, 0xFF42D1FF);
     }
 
-    private void renderTopOverlay(GuiGraphics guiGraphics, Minecraft mc, double worldLeft, double worldTop, double pixelsPerBlock) {
+    private void renderOverlayPass(GuiGraphics guiGraphics, Minecraft mc, double worldLeft, double worldTop, double pixelsPerBlock) {
         guiGraphics.flush();
+        RenderSystem.disableDepthTest();
         PoseStack pose = guiGraphics.pose();
         pose.pushPose();
-        pose.translate(0.0f, 0.0f, 250.0f);
+        pose.translate(0.0f, 0.0f, 350.0f);
 
-        beginMapScissor(mc);
         try {
-            if (ChunkManagerClientState.isGridEnabled()) {
-                renderChunkGrid(guiGraphics, worldLeft, worldTop, pixelsPerBlock);
+            beginMapScissor(mc);
+            try {
+                if (ChunkManagerClientState.isGridEnabled()) {
+                    renderChunkGrid(guiGraphics, worldLeft, worldTop, pixelsPerBlock);
+                }
+                renderPlayerMarker(guiGraphics, mc, worldLeft, worldTop, pixelsPerBlock);
+            } finally {
+                RenderSystem.disableScissor();
             }
-            renderPlayerMarker(guiGraphics, mc, worldLeft, worldTop, pixelsPerBlock);
+
+            renderCompass(guiGraphics);
         } finally {
-            RenderSystem.disableScissor();
+            pose.popPose();
+            RenderSystem.enableDepthTest();
+        }
+        guiGraphics.flush();
+    }
+
+    private TileRenderBounds calculateTileRenderBounds(double worldLeft, double worldTop, double worldSpan, double pixelsPerBlock, int blockSize) {
+        double safePixelsPerBlock = Math.max(0.0001, pixelsPerBlock);
+        double tileSizePixels = blockSize * safePixelsPerBlock;
+
+        double dynamicPaddingPixels = Mth.clamp(
+                TILE_SELECTION_PADDING_PIXELS + (tileSizePixels * 0.02),
+                TILE_SELECTION_PADDING_PIXELS,
+                MAX_DYNAMIC_PADDING_PIXELS
+        );
+        double paddingBlocks = Math.max(1.0, dynamicPaddingPixels / safePixelsPerBlock);
+
+        double dynamicOverlapPixels = Mth.clamp(
+                TILE_OVERLAP_PIXELS + (dynamicPaddingPixels * 0.35),
+                TILE_OVERLAP_PIXELS,
+                Math.max(TILE_OVERLAP_PIXELS, Math.min(MAX_DYNAMIC_OVERLAP_PIXELS, tileSizePixels * 0.25))
+        );
+        double tileOverlapPixels = quantizeOverlap(dynamicOverlapPixels);
+
+        double paddedWorldLeft = worldLeft - paddingBlocks;
+        double paddedWorldTop = worldTop - paddingBlocks;
+        double paddedWorldRight = worldLeft + worldSpan + paddingBlocks;
+        double paddedWorldBottom = worldTop + worldSpan + paddingBlocks;
+
+        int minGridX = Math.floorDiv(Mth.floor(paddedWorldLeft), blockSize);
+        int minGridZ = Math.floorDiv(Mth.floor(paddedWorldTop), blockSize);
+        int maxGridX = Math.floorDiv(Mth.ceil(paddedWorldRight) - 1, blockSize);
+        int maxGridZ = Math.floorDiv(Mth.ceil(paddedWorldBottom) - 1, blockSize);
+
+        int centerGridX = Math.floorDiv(Mth.floor(centerBlockX), blockSize);
+        int centerGridZ = Math.floorDiv(Mth.floor(centerBlockZ), blockSize);
+        int viewTileCount = Math.max(3, Mth.ceil(worldSpan / Math.max(1.0, blockSize)) + 2);
+        int maxTilesAxis = Math.min(MAX_TILES_PER_AXIS, viewTileCount);
+
+        minGridX = clampToTileAxis(minGridX, maxGridX, centerGridX, maxTilesAxis, true);
+        maxGridX = clampToTileAxis(minGridX, maxGridX, centerGridX, maxTilesAxis, false);
+        minGridZ = clampToTileAxis(minGridZ, maxGridZ, centerGridZ, maxTilesAxis, true);
+        maxGridZ = clampToTileAxis(minGridZ, maxGridZ, centerGridZ, maxTilesAxis, false);
+
+        return new TileRenderBounds(minGridX, minGridZ, maxGridX, maxGridZ, tileOverlapPixels);
+    }
+
+    private static int clampToTileAxis(int minGrid, int maxGrid, int centerGrid, int maxTilesAxis, boolean returnMin) {
+        int currentCount = maxGrid - minGrid + 1;
+        if (currentCount <= maxTilesAxis) {
+            return returnMin ? minGrid : maxGrid;
         }
 
-        renderCompass(guiGraphics);
-        guiGraphics.flush();
-        pose.popPose();
+        int half = maxTilesAxis / 2;
+        int newMin = centerGrid - half;
+        int newMax = newMin + maxTilesAxis - 1;
+        return returnMin ? newMin : newMax;
+    }
+
+    private static double quantizeOverlap(double overlapPixels) {
+        return Math.round(overlapPixels / OVERLAP_QUANTIZATION_PIXELS) * OVERLAP_QUANTIZATION_PIXELS;
+    }
+
+    private record TileRenderBounds(int minGridX, int minGridZ, int maxGridX, int maxGridZ, double tileOverlapPixels) {
     }
 
     private static void drawPixelLine(GuiGraphics guiGraphics, int x0, int y0, int x1, int y1, int color) {

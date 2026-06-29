@@ -4,6 +4,7 @@ public final class ChunkManagerClientState {
     private static final int[] MINIMAP_SIZES = new int[] {64, 96, 128};
 
     private static boolean showGrid = true;
+    private static boolean showDebugLogs;
     private static int minimapSizeIndex = 1;
 
     private ChunkManagerClientState() {
@@ -23,5 +24,14 @@ public final class ChunkManagerClientState {
 
     public static void cycleMinimapSize() {
         minimapSizeIndex = (minimapSizeIndex + 1) % MINIMAP_SIZES.length;
+    }
+
+    public static boolean isDebugLogsEnabled() {
+        return showDebugLogs;
+    }
+
+    public static boolean toggleDebugLogs() {
+        showDebugLogs = !showDebugLogs;
+        return showDebugLogs;
     }
 }

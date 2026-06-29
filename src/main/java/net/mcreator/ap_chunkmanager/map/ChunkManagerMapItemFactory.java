@@ -14,6 +14,17 @@ public final class ChunkManagerMapItemFactory {
     private ChunkManagerMapItemFactory() {
     }
 
+    public static MapItemSavedData createMapData(Level level, int centerX, int centerZ, byte scale) {
+        if (level == null) {
+            return null;
+        }
+
+        MapItemSavedData mapData = MapItemSavedData.createFresh(centerX, centerZ, scale, true, true, level.dimension());
+        populateMap(level, mapData);
+        mapData.setDirty();
+        return mapData;
+    }
+
     public static ItemStack createMapItem(Level level, double worldX, double worldZ, byte scale) {
         if (level == null) {
             return ItemStack.EMPTY;
