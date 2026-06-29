@@ -1,11 +1,15 @@
 package net.mcreator.ap_chunkmanager.client;
 
 import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.math.Axis;
 import net.mcreator.ap_chunkmanager.APChunkManagerMod;
 import net.minecraft.core.BlockPos;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
+import net.minecraft.world.item.MapItem;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.material.MapColor;
@@ -22,9 +26,9 @@ import java.util.Map;
 @Mod.EventBusSubscriber(modid = APChunkManagerMod.MOD_ID, value = Dist.CLIENT, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class ChunkManagerRuntimeEvents {
     private static final int ROWS_PER_UPDATE = 8;
+    private static final ResourceLocation COMPASS_TEXTURE = new ResourceLocation("minecraft", "textures/item/compass_00.png");
     private static final Map<Long, MapScanState> SCAN_STATE_BY_MAP = new HashMap<>();
     private static final Map<Integer, MapItemSavedData> VIRTUAL_MAPS = new HashMap<>();
-    private static int NEXT_EXTRACTED_MAP_ID = -100_000;
 
     private ChunkManagerRuntimeEvents() {
     }
@@ -97,8 +101,10 @@ public final class ChunkManagerRuntimeEvents {
         buffers.endBatch();
         poseStack.popPose();
 
-        renderHudCompass(event.getGuiGraphics(), mc, mapX, mapY);
-        renderHudPlayerPointer(event.getGuiGraphics(), mc, mapData, mapX, mapY, minimapSize);
+        renderOverlayLayer(event.getGuiGraphics(), graphics -> {
+            renderHudCompass(graphics, mc, mapX, mapY);
+            renderHudPlayerPointer(graphics, mc, mapData, mapX, mapY, minimapSize);
+        });
     }
 
     public static MapItemSavedData getVirtualMapData(Minecraft mc, double playerX, double playerZ, byte schaal, int mapId) {
@@ -132,6 +138,8 @@ public final class ChunkManagerRuntimeEvents {
             return;
         }
 
+        refreshVirtualMapData(mc, virtualData, 128);
+
         String physicalKey = "map_" + physicalMapId;
         MapItemSavedData physicalData = mc.level.getMapData(physicalKey);
         if (physicalData == null) {
@@ -139,38 +147,38 @@ public final class ChunkManagerRuntimeEvents {
             mc.level.setMapData(physicalKey, physicalData);
         }
 
-        for (int z = 0; z < 128; z++) {
-            for (int x = 0; x < 128; x++) {
-                int idx = x + z * 128;
-                physicalData.updateColor(x, z, virtualData.colors[idx]);
-            }
-        }
+        copyMapColors(virtualData, physicalData);
+        physicalData.setDirty();
     }
 
-    public static int createExtractedMapFromVirtual(Minecraft mc, int virtualMapId, double centerX, double centerZ, byte scale) {
+    public static ItemStack createExtractedMapItem(Minecraft mc, int virtualMapId, double centerX, double centerZ, byte scale) {
         if (mc == null || mc.level == null) {
-            return calculatePhysicalMapId(centerX, centerZ, scale);
+            return ItemStack.EMPTY;
         }
 
         MapItemSavedData virtualData = getVirtualMapData(mc, centerX, centerZ, scale, virtualMapId);
         if (virtualData == null) {
-            return calculatePhysicalMapId(centerX, centerZ, scale);
+            return ItemStack.EMPTY;
         }
 
-        int extractedId = NEXT_EXTRACTED_MAP_ID--;
-        String physicalKey = "map_" + extractedId;
-        MapItemSavedData extractedData = MapItemSavedData.createFresh(virtualData.centerX, virtualData.centerZ, virtualData.scale, true, true, mc.level.dimension());
+        refreshVirtualMapData(mc, virtualData, 128);
 
-        for (int z = 0; z < 128; z++) {
-            for (int x = 0; x < 128; x++) {
-                int idx = x + z * 128;
-                extractedData.updateColor(x, z, virtualData.colors[idx]);
-            }
+        ItemStack mapItem = MapItem.create(mc.level, virtualData.centerX, virtualData.centerZ, virtualData.scale, true, true);
+        Integer physicalMapId = MapItem.getMapId(mapItem);
+        if (physicalMapId == null) {
+            return ItemStack.EMPTY;
         }
 
-        mc.level.setMapData(physicalKey, extractedData);
-        mc.gameRenderer.getMapRenderer().update(extractedId, extractedData);
-        return extractedId;
+        MapItemSavedData extractedData = MapItem.getSavedData(mapItem, mc.level);
+        if (extractedData == null) {
+            extractedData = MapItemSavedData.createFresh(virtualData.centerX, virtualData.centerZ, virtualData.scale, true, true, mc.level.dimension());
+            mc.level.setMapData(MapItem.makeKey(physicalMapId), extractedData);
+        }
+
+        copyMapColors(virtualData, extractedData);
+        extractedData.setDirty();
+        mc.gameRenderer.getMapRenderer().update(physicalMapId, extractedData);
+        return mapItem;
     }
 
     public static int calculateVirtualMapId(double playerX, double playerZ, byte schaal) {
@@ -202,15 +210,25 @@ public final class ChunkManagerRuntimeEvents {
         }
         scanState.lastProcessedTick = gameTime;
 
+        refreshVirtualMapData(mc, mapData, ROWS_PER_UPDATE);
+    }
+
+    private static void refreshVirtualMapData(Minecraft mc, MapItemSavedData mapData, int rowsToProcess) {
+        if (mc == null || mc.level == null || mapData == null || rowsToProcess <= 0) {
+            return;
+        }
+
         int scaleMultiplier = 1 << mapData.scale;
         int startX = mapData.centerX - 64 * scaleMultiplier;
         int startZ = mapData.centerZ - 64 * scaleMultiplier;
 
         BlockPos.MutableBlockPos mutablePos = new BlockPos.MutableBlockPos();
+        long mapKey = (((long) mapData.centerX) << 32) ^ (mapData.centerZ & 0xffffffffL) ^ mapData.scale;
+        MapScanState scanState = SCAN_STATE_BY_MAP.computeIfAbsent(mapKey, ignored -> new MapScanState());
         int startRow = scanState.nextRow;
-        int rowsToProcess = Math.min(ROWS_PER_UPDATE, 128);
+        int limitedRows = Math.min(rowsToProcess, 128);
 
-        for (int row = 0; row < rowsToProcess; row++) {
+        for (int row = 0; row < limitedRows; row++) {
             int z = (startRow + row) & 127;
             for (int x = 0; x < 128; x++) {
                 int worldX = startX + (x * scaleMultiplier) + (scaleMultiplier / 2);
@@ -232,7 +250,16 @@ public final class ChunkManagerRuntimeEvents {
             }
         }
 
-        scanState.nextRow = (startRow + rowsToProcess) & 127;
+        scanState.nextRow = (startRow + limitedRows) & 127;
+    }
+
+    private static void copyMapColors(MapItemSavedData source, MapItemSavedData target) {
+        for (int z = 0; z < 128; z++) {
+            for (int x = 0; x < 128; x++) {
+                int idx = x + z * 128;
+                target.updateColor(x, z, source.colors[idx]);
+            }
+        }
     }
 
     private static final class MapScanState {
@@ -243,8 +270,8 @@ public final class ChunkManagerRuntimeEvents {
     private static void renderHudCompass(net.minecraft.client.gui.GuiGraphics guiGraphics, Minecraft mc, int mapX, int mapY) {
         int cx = mapX + 16;
         int cy = mapY + 16;
-        guiGraphics.fill(cx - 1, cy - 8, cx + 1, cy + 8, 0xC0D7E8FF);
-        guiGraphics.fill(cx - 8, cy - 1, cx + 8, cy + 1, 0xC0D7E8FF);
+        guiGraphics.fill(cx - 12, cy - 12, cx + 12, cy + 12, 0x80202C3E);
+        drawRotatedTexture(guiGraphics, COMPASS_TEXTURE, cx, cy, 18, mc.player != null ? -mc.player.getYRot() : 0.0f);
 
         if (mc.font != null) {
             float yaw = mc.player != null ? mc.player.getYRot() : 0.0f;
@@ -307,6 +334,27 @@ public final class ChunkManagerRuntimeEvents {
         int ty = cy - (int) Math.round(Math.cos(angleRad) * radius) - 4;
         guiGraphics.fill(tx - 2, ty - 1, tx + 8, ty + 9, 0x70000000);
         guiGraphics.drawString(mc.font, text, tx, ty, color, false);
+    }
+
+    private static void drawRotatedTexture(net.minecraft.client.gui.GuiGraphics guiGraphics, ResourceLocation texture, int centerX, int centerY, int size,
+            float rotationDegrees) {
+        PoseStack pose = guiGraphics.pose();
+        int halfSize = size / 2;
+        pose.pushPose();
+        pose.translate(centerX, centerY, 0.0f);
+        pose.mulPose(Axis.ZP.rotationDegrees(rotationDegrees));
+        guiGraphics.blit(texture, -halfSize, -halfSize, 0.0f, 0.0f, size, size, size, size);
+        pose.popPose();
+    }
+
+    private static void renderOverlayLayer(net.minecraft.client.gui.GuiGraphics guiGraphics, java.util.function.Consumer<net.minecraft.client.gui.GuiGraphics> renderer) {
+        guiGraphics.flush();
+        PoseStack pose = guiGraphics.pose();
+        pose.pushPose();
+        pose.translate(0.0f, 0.0f, 250.0f);
+        renderer.accept(guiGraphics);
+        guiGraphics.flush();
+        pose.popPose();
     }
 
     private static void drawPixelLine(net.minecraft.client.gui.GuiGraphics guiGraphics, int x0, int y0, int x1, int y1, int color) {

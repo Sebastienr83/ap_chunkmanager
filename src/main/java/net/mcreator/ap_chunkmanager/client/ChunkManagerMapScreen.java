@@ -3,15 +3,16 @@ package net.mcreator.ap_chunkmanager.client;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.platform.Window;
+import com.mojang.math.Axis;
+import net.mcreator.ap_chunkmanager.APChunkManagerMod;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
-import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.Items;
 import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
 
 public class ChunkManagerMapScreen extends Screen {
@@ -19,6 +20,9 @@ public class ChunkManagerMapScreen extends Screen {
     private static final byte MAX_SCALE = 4;
     private static final double MIN_ZOOM_RADIUS_BLOCKS = 48.0;
     private static final double MAX_ZOOM_RADIUS_BLOCKS = 2048.0;
+    private static final double TILE_SELECTION_PADDING_PIXELS = 3.0;
+    private static final double TILE_OVERLAP_PIXELS = 1.25;
+    private static final ResourceLocation COMPASS_TEXTURE = new ResourceLocation("minecraft", "textures/item/compass_00.png");
 
     private byte currentMapScale = 0;
     private int mapX;
@@ -131,12 +135,7 @@ public class ChunkManagerMapScreen extends Screen {
                 double targetWorldX = lastWorldLeft + (localX * lastWorldSpan);
                 double targetWorldZ = lastWorldTop + (localZ * lastWorldSpan);
 
-                int virtualMapId = ChunkManagerRuntimeEvents.calculateVirtualMapId(targetWorldX, targetWorldZ, currentMapScale);
-                int physicalMapId = ChunkManagerRuntimeEvents.createExtractedMapFromVirtual(mc, virtualMapId, targetWorldX, targetWorldZ, currentMapScale);
-
-                ItemStack mapItem = new ItemStack(Items.FILLED_MAP);
-                mapItem.getOrCreateTag().putInt("map", physicalMapId);
-                mc.player.getInventory().add(mapItem);
+                APChunkManagerMod.NETWORK.sendToServer(new net.mcreator.ap_chunkmanager.network.CopyChunkMapSectionPacket(targetWorldX, targetWorldZ, currentMapScale));
                 return true;
             }
         }
@@ -215,20 +214,8 @@ public class ChunkManagerMapScreen extends Screen {
         lastWorldSpan = worldSpan;
         lastBlocksPerPixel = blocksPerPixel;
 
-        beginMapScissor(mc);
-        try {
-            renderStitchedMaps(guiGraphics, mc, worldLeft, worldTop, worldSpan, pixelsPerBlock);
-
-            if (ChunkManagerClientState.isGridEnabled()) {
-                renderChunkGrid(guiGraphics, worldLeft, worldTop, pixelsPerBlock);
-            }
-
-            renderPlayerMarker(guiGraphics, mc, worldLeft, worldTop, pixelsPerBlock);
-        } finally {
-            RenderSystem.disableScissor();
-        }
-
-        renderCompass(guiGraphics);
+        renderMapLayer(guiGraphics, mc, worldLeft, worldTop, worldSpan, pixelsPerBlock);
+        renderTopOverlay(guiGraphics, mc, worldLeft, worldTop, pixelsPerBlock);
 
         int centerVirtualId = ChunkManagerRuntimeEvents.calculateVirtualMapId(centerBlockX, centerBlockZ, currentMapScale);
         guiGraphics.drawString(this.font, "Map ID: " + centerVirtualId, panelX + 12, panelY + 116, 0xFFD7E3F4, false);
@@ -240,12 +227,27 @@ public class ChunkManagerMapScreen extends Screen {
         super.render(guiGraphics, mouseX, mouseY, partialTick);
     }
 
+    private void renderMapLayer(GuiGraphics guiGraphics, Minecraft mc, double worldLeft, double worldTop, double worldSpan, double pixelsPerBlock) {
+        beginMapScissor(mc);
+        try {
+            renderStitchedMaps(guiGraphics, mc, worldLeft, worldTop, worldSpan, pixelsPerBlock);
+        } finally {
+            RenderSystem.disableScissor();
+        }
+    }
+
     private void renderStitchedMaps(GuiGraphics guiGraphics, Minecraft mc, double worldLeft, double worldTop, double worldSpan, double pixelsPerBlock) {
+        double tileSelectionPaddingBlocks = Math.max(1.0, TILE_SELECTION_PADDING_PIXELS / Math.max(0.0001, pixelsPerBlock));
+        double paddedWorldLeft = worldLeft - tileSelectionPaddingBlocks;
+        double paddedWorldTop = worldTop - tileSelectionPaddingBlocks;
+        double paddedWorldRight = worldLeft + worldSpan + tileSelectionPaddingBlocks;
+        double paddedWorldBottom = worldTop + worldSpan + tileSelectionPaddingBlocks;
         int blockSize = 128 * (1 << currentMapScale);
-        int minGridX = Math.floorDiv(Mth.floor(worldLeft), blockSize);
-        int minGridZ = Math.floorDiv(Mth.floor(worldTop), blockSize);
-        int maxGridX = Math.floorDiv(Mth.ceil(worldLeft + worldSpan) - 1, blockSize);
-        int maxGridZ = Math.floorDiv(Mth.ceil(worldTop + worldSpan) - 1, blockSize);
+        int minGridX = Math.floorDiv(Mth.floor(paddedWorldLeft), blockSize);
+        int minGridZ = Math.floorDiv(Mth.floor(paddedWorldTop), blockSize);
+        int maxGridX = Math.floorDiv(Mth.ceil(paddedWorldRight) - 1, blockSize);
+        int maxGridZ = Math.floorDiv(Mth.ceil(paddedWorldBottom) - 1, blockSize);
+        double tileOverlapPixels = Mth.clamp(TILE_OVERLAP_PIXELS, 0.0, Math.max(0.0, blockSize * pixelsPerBlock * 0.25));
 
         MultiBufferSource.BufferSource buffers = mc.renderBuffers().bufferSource();
 
@@ -265,10 +267,15 @@ public class ChunkManagerMapScreen extends Screen {
                 ChunkManagerRuntimeEvents.updateMapColorsClientSide(mc, mapData);
                 mc.gameRenderer.getMapRenderer().update(mapId, mapData);
 
-                int drawX = mapX + (int) Math.round((tileMinX - worldLeft) * pixelsPerBlock);
-                int drawY = mapY + (int) Math.round((tileMinZ - worldTop) * pixelsPerBlock);
-                int drawW = (int) Math.ceil(blockSize * pixelsPerBlock);
-                int drawH = drawW;
+                double drawLeft = mapX + ((tileMinX - worldLeft) * pixelsPerBlock) - tileOverlapPixels;
+                double drawTop = mapY + ((tileMinZ - worldTop) * pixelsPerBlock) - tileOverlapPixels;
+                double drawRight = mapX + (((tileMinX + blockSize) - worldLeft) * pixelsPerBlock) + tileOverlapPixels;
+                double drawBottom = mapY + (((tileMinZ + blockSize) - worldTop) * pixelsPerBlock) + tileOverlapPixels;
+
+                int drawX = Mth.floor(drawLeft);
+                int drawY = Mth.floor(drawTop);
+                int drawW = Mth.ceil(drawRight) - drawX;
+                int drawH = Mth.ceil(drawBottom) - drawY;
 
                 if (drawW <= 0 || drawH <= 0) {
                     continue;
@@ -287,7 +294,8 @@ public class ChunkManagerMapScreen extends Screen {
     }
 
     private void renderChunkGrid(GuiGraphics guiGraphics, double worldLeft, double worldTop, double pixelsPerBlock) {
-        int color = 0x60FFFFFF;
+        int majorColor = 0x78E6F0FF;
+        int minorColor = 0x46FFFFFF;
         int gridStepBlocks = 16;
         while ((gridStepBlocks * pixelsPerBlock) < 14.0 && gridStepBlocks < 1024) {
             gridStepBlocks *= 2;
@@ -303,20 +311,26 @@ public class ChunkManagerMapScreen extends Screen {
 
         for (int gx = firstGridX; gx <= maxX; gx += gridStepBlocks) {
             int sx = mapX + (int) Math.round((gx - worldLeft) * pixelsPerBlock);
-            guiGraphics.fill(sx, mapY, sx + 1, mapY + mapSize, color);
+            boolean majorLine = isMajorGridLine(gx);
+            guiGraphics.fill(sx, mapY, sx + (majorLine ? 2 : 1), mapY + mapSize, majorLine ? majorColor : minorColor);
         }
 
         for (int gz = firstGridZ; gz <= maxZ; gz += gridStepBlocks) {
             int sy = mapY + (int) Math.round((gz - worldTop) * pixelsPerBlock);
-            guiGraphics.fill(mapX, sy, mapX + mapSize, sy + 1, color);
+            boolean majorLine = isMajorGridLine(gz);
+            guiGraphics.fill(mapX, sy, mapX + mapSize, sy + (majorLine ? 2 : 1), majorLine ? majorColor : minorColor);
         }
+    }
+
+    private static boolean isMajorGridLine(int worldCoordinate) {
+        return Math.floorMod(worldCoordinate, 64) == 0;
     }
 
     private void renderCompass(GuiGraphics guiGraphics) {
         int cx = mapX + 20;
         int cy = mapY + 20;
-        guiGraphics.fill(cx - 1, cy - 10, cx + 1, cy + 10, 0xCCB6C7E2);
-        guiGraphics.fill(cx - 10, cy - 1, cx + 10, cy + 1, 0xCCB6C7E2);
+        guiGraphics.fill(cx - 14, cy - 14, cx + 14, cy + 14, 0x80202C3E);
+        drawRotatedTexture(guiGraphics, COMPASS_TEXTURE, cx, cy, 20, Minecraft.getInstance().player != null ? -Minecraft.getInstance().player.getYRot() : 0.0f);
         guiGraphics.drawString(this.font, "N", cx - 3, cy - 20, 0xFFEAF2FF, false);
         guiGraphics.drawString(this.font, "S", cx - 3, cy + 12, 0xFFEAF2FF, false);
         guiGraphics.drawString(this.font, "W", cx - 20, cy - 4, 0xFFEAF2FF, false);
@@ -328,8 +342,8 @@ public class ChunkManagerMapScreen extends Screen {
             return;
         }
 
-        int px = mapX + (int) Math.round((mc.player.getX() - worldLeft) * pixelsPerBlock);
-        int pz = mapY + (int) Math.round((mc.player.getZ() - worldTop) * pixelsPerBlock);
+        int px = worldToMapPixel(mc.player.getX(), worldLeft, pixelsPerBlock, mapX);
+        int pz = worldToMapPixel(mc.player.getZ(), worldTop, pixelsPerBlock, mapY);
         if (px < mapX - 12 || px > mapX + mapSize + 12 || pz < mapY - 12 || pz > mapY + mapSize + 12) {
             return;
         }
@@ -344,6 +358,27 @@ public class ChunkManagerMapScreen extends Screen {
         guiGraphics.fill(px - 2, pz - 2, px + 2, pz + 2, 0xFF8FE8FF);
         drawPixelLine(guiGraphics, px, pz, tipX, tipZ, 0xFF42D1FF);
         guiGraphics.fill(tipX - 2, tipZ - 2, tipX + 2, tipZ + 2, 0xFF42D1FF);
+    }
+
+    private void renderTopOverlay(GuiGraphics guiGraphics, Minecraft mc, double worldLeft, double worldTop, double pixelsPerBlock) {
+        guiGraphics.flush();
+        PoseStack pose = guiGraphics.pose();
+        pose.pushPose();
+        pose.translate(0.0f, 0.0f, 250.0f);
+
+        beginMapScissor(mc);
+        try {
+            if (ChunkManagerClientState.isGridEnabled()) {
+                renderChunkGrid(guiGraphics, worldLeft, worldTop, pixelsPerBlock);
+            }
+            renderPlayerMarker(guiGraphics, mc, worldLeft, worldTop, pixelsPerBlock);
+        } finally {
+            RenderSystem.disableScissor();
+        }
+
+        renderCompass(guiGraphics);
+        guiGraphics.flush();
+        pose.popPose();
     }
 
     private static void drawPixelLine(GuiGraphics guiGraphics, int x0, int y0, int x1, int y1, int color) {
@@ -390,6 +425,20 @@ public class ChunkManagerMapScreen extends Screen {
 
     private boolean isInsideMap(double mouseX, double mouseY) {
         return mouseX >= mapX && mouseX <= mapX + mapSize && mouseY >= mapY && mouseY <= mapY + mapSize;
+    }
+
+    private static int worldToMapPixel(double worldCoord, double worldStart, double pixelsPerBlock, int mapStart) {
+        return mapStart + (int) Math.round((worldCoord - worldStart) * pixelsPerBlock);
+    }
+
+    private static void drawRotatedTexture(GuiGraphics guiGraphics, ResourceLocation texture, int centerX, int centerY, int size, float rotationDegrees) {
+        PoseStack pose = guiGraphics.pose();
+        int halfSize = size / 2;
+        pose.pushPose();
+        pose.translate(centerX, centerY, 0.0f);
+        pose.mulPose(Axis.ZP.rotationDegrees(rotationDegrees));
+        guiGraphics.blit(texture, -halfSize, -halfSize, 0.0f, 0.0f, size, size, size, size);
+        pose.popPose();
     }
 
     private void beginMapScissor(Minecraft mc) {
