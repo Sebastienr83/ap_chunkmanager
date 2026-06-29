@@ -32,7 +32,6 @@ import java.util.Map;
 public final class ChunkManagerRuntimeEvents {
     private static final int ROWS_PER_UPDATE = 8;
     private static final long TILE_REQUEST_COOLDOWN_MS = 700L;
-    private static final byte HUD_MAP_SCALE = 0;
     private static final int HUD_MAX_TILES_PER_AXIS = 5;
     private static final int HUD_MAX_TOTAL_TILES = 25;
     private static final double HUD_TILE_PADDING_PIXELS = 2.0;
@@ -45,8 +44,10 @@ public final class ChunkManagerRuntimeEvents {
     private static final Map<Integer, MapItemSavedData> VIRTUAL_MAPS = new HashMap<>();
     private static final Map<Integer, Long> LAST_TILE_REQUEST_MS = new HashMap<>();
     private static final long CLAIM_INFO_REQUEST_COOLDOWN_MS = 250L;
+    private static final long CLAIM_INFO_CACHE_TTL_MS = 1200L;
     private static final Map<Long, Long> LAST_CLAIM_REQUEST_MS = new HashMap<>();
     private static final Map<Long, ChunkClaimInfo> CLAIM_INFO_CACHE = new HashMap<>();
+    private static final Map<Long, Long> CLAIM_INFO_CACHE_AT_MS = new HashMap<>();
 
     private ChunkManagerRuntimeEvents() {
     }
@@ -94,7 +95,8 @@ public final class ChunkManagerRuntimeEvents {
 
         event.getGuiGraphics().fill(mapX - pad, mapY - pad, mapX + minimapSize + pad, mapY + minimapSize + pad, 0x90303030);
 
-        int scaleMultiplier = 1 << HUD_MAP_SCALE;
+        byte hudMapScale = ChunkManagerClientState.getMinimapScale();
+        int scaleMultiplier = 1 << hudMapScale;
         double worldSpan = 128.0 * scaleMultiplier;
         double playerX = mc.player.getX();
         double playerZ = mc.player.getZ();
@@ -102,7 +104,7 @@ public final class ChunkManagerRuntimeEvents {
         double worldTop = playerZ - (worldSpan / 2.0);
         double pixelsPerBlock = minimapSize / Math.max(1.0, worldSpan);
 
-        renderHudMapPass(event.getGuiGraphics(), mc, mapX, mapY, minimapSize, worldLeft, worldTop, worldSpan, pixelsPerBlock, HUD_MAP_SCALE);
+        renderHudMapPass(event.getGuiGraphics(), mc, mapX, mapY, minimapSize, worldLeft, worldTop, worldSpan, pixelsPerBlock, hudMapScale);
         renderHudOverlayPass(event.getGuiGraphics(), mc, mapX, mapY, minimapSize, worldLeft, worldTop, pixelsPerBlock);
     }
 
@@ -216,8 +218,9 @@ public final class ChunkManagerRuntimeEvents {
         try {
             beginHudScissor(mc, mapX, mapY, minimapSize);
             try {
-                int centerMapId = calculateVirtualMapId(mc.player.getX(), mc.player.getZ(), HUD_MAP_SCALE);
-                MapItemSavedData centerMapData = getVirtualMapData(mc, mc.player.getX(), mc.player.getZ(), HUD_MAP_SCALE, centerMapId);
+                byte hudMapScale = ChunkManagerClientState.getMinimapScale();
+                int centerMapId = calculateVirtualMapId(mc.player.getX(), mc.player.getZ(), hudMapScale);
+                MapItemSavedData centerMapData = getVirtualMapData(mc, mc.player.getX(), mc.player.getZ(), hudMapScale, centerMapId);
                 renderHudPlayerPointer(guiGraphics, mc, centerMapData, mapX, mapY, minimapSize);
             } finally {
                 RenderSystem.disableScissor();
@@ -439,7 +442,14 @@ public final class ChunkManagerRuntimeEvents {
     }
 
     public static ChunkClaimInfo getCachedChunkClaimInfo(int chunkX, int chunkZ) {
-        return CLAIM_INFO_CACHE.get(packChunk(chunkX, chunkZ));
+        long key = packChunk(chunkX, chunkZ);
+        long cachedAt = CLAIM_INFO_CACHE_AT_MS.getOrDefault(key, 0L);
+        if (cachedAt <= 0L || (System.currentTimeMillis() - cachedAt) > CLAIM_INFO_CACHE_TTL_MS) {
+            CLAIM_INFO_CACHE.remove(key);
+            CLAIM_INFO_CACHE_AT_MS.remove(key);
+            return null;
+        }
+        return CLAIM_INFO_CACHE.get(key);
     }
 
     public static void applyServerChunkClaimInfo(int chunkX, int chunkZ, boolean claimed, String chunkName, String teamName, String roleName,
@@ -449,10 +459,12 @@ public final class ChunkManagerRuntimeEvents {
 
         if (!claimed) {
             CLAIM_INFO_CACHE.remove(key);
+            CLAIM_INFO_CACHE_AT_MS.remove(key);
             return;
         }
 
         CLAIM_INFO_CACHE.put(key, new ChunkClaimInfo(chunkX, chunkZ, safe(chunkName), safe(teamName), safe(roleName), safe(ownerName)));
+        CLAIM_INFO_CACHE_AT_MS.put(key, System.currentTimeMillis());
     }
 
     private static String safe(String value) {

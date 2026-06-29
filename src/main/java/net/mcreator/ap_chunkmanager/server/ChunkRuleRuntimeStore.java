@@ -28,11 +28,11 @@ public final class ChunkRuleRuntimeStore {
     private ChunkRuleRuntimeStore() {
     }
 
-    public static void storeRule(ServerPlayer player, CreateChunkRulePacket packet) {
+    public static StoreFeedback storeRule(ServerPlayer player, CreateChunkRulePacket packet) {
         ValidationResult validation = validateClaimPacket(player, packet);
         if (!validation.isAllowed()) {
             player.displayClientMessage(validation.message(), true);
-            return;
+            return StoreFeedback.fail(validation.message().getString());
         }
 
         ChunkRuleSavedData data = getData(player.level());
@@ -43,6 +43,15 @@ public final class ChunkRuleRuntimeStore {
         if (!result.message().getString().isEmpty()) {
             player.displayClientMessage(result.message(), true);
         }
+
+        if (result.storedChunks() > 0) {
+            String suffix = result.message().getString().isEmpty() ? "" : " (" + result.message().getString() + ")";
+            return StoreFeedback.success("Chunk creation succeeded: " + result.storedChunks() + " chunks" + suffix);
+        }
+        if (!result.message().getString().isEmpty()) {
+            return StoreFeedback.fail(result.message().getString());
+        }
+        return StoreFeedback.fail("Chunk creation failed.");
     }
 
     public static BuildAccessResult canBuildAt(ServerPlayer player, BlockPos pos) {
@@ -95,7 +104,7 @@ public final class ChunkRuleRuntimeStore {
             return ClaimInfo.none();
         }
 
-        String roleName = rule.assignRoleToChunk() ? (rule.ownerTeamName().isEmpty() ? "Team Role" : rule.ownerTeamName()) : "None";
+        String roleName = rule.assignRoleToChunk() ? rule.roleName() : "None";
         return new ClaimInfo(true, rule.name(), rule.ownerTeamName(), roleName, rule.ownerName());
     }
 
@@ -115,6 +124,9 @@ public final class ChunkRuleRuntimeStore {
         }
         if (packet.assignRoleToChunk() && player.getTeam() == null) {
             return ValidationResult.deny("Assign @Role requires that you are in a team.");
+        }
+        if (packet.assignRoleToChunk() && packet.roleName().isBlank()) {
+            return ValidationResult.deny("Select a role for this chunk.");
         }
         if (!isKnownResource(packet.rewardResource())) {
             return ValidationResult.deny("Unknown reward resource: " + packet.rewardResource());
@@ -205,6 +217,16 @@ public final class ChunkRuleRuntimeStore {
     private record SaveResult(int storedChunks, Component message) {
     }
 
+    public record StoreFeedback(boolean success, String message) {
+        static StoreFeedback success(String message) {
+            return new StoreFeedback(true, message == null ? "" : message);
+        }
+
+        static StoreFeedback fail(String message) {
+            return new StoreFeedback(false, message == null ? "" : message);
+        }
+    }
+
     private static final class ChunkRuleSavedData extends SavedData {
         private static final String KEY_DIMENSIONS = "dimensions";
         private static final String KEY_DIMENSION = "dimension";
@@ -257,6 +279,8 @@ public final class ChunkRuleRuntimeStore {
                         ownerTeam,
                         sanitizeName(packet.name()),
                         packet.assignRoleToChunk(),
+                        packet.roleName().trim(),
+                        packet.roleColorRgb(),
                         packet.requireTeam(),
                         Math.max(0, packet.buildHeightAboveFace()),
                         Math.max(0, packet.buildDepthBelowFace()),
@@ -364,6 +388,8 @@ public final class ChunkRuleRuntimeStore {
             String ownerTeamName,
             String name,
             boolean assignRoleToChunk,
+            String roleName,
+            int roleColorRgb,
             boolean requireTeam,
             int buildHeightAboveFace,
             int buildDepthBelowFace,
@@ -384,6 +410,8 @@ public final class ChunkRuleRuntimeStore {
         private static final String KEY_OWNER_TEAM = "ownerTeam";
         private static final String KEY_NAME = "name";
         private static final String KEY_ASSIGN_ROLE = "assignRole";
+        private static final String KEY_ROLE_NAME = "roleName";
+        private static final String KEY_ROLE_COLOR = "roleColor";
         private static final String KEY_REQUIRE_TEAM = "requireTeam";
         private static final String KEY_BUILD_ABOVE = "buildAbove";
         private static final String KEY_BUILD_BELOW = "buildBelow";
@@ -406,6 +434,8 @@ public final class ChunkRuleRuntimeStore {
             tag.putString(KEY_OWNER_TEAM, ownerTeamName);
             tag.putString(KEY_NAME, name);
             tag.putBoolean(KEY_ASSIGN_ROLE, assignRoleToChunk);
+            tag.putString(KEY_ROLE_NAME, roleName);
+            tag.putInt(KEY_ROLE_COLOR, roleColorRgb);
             tag.putBoolean(KEY_REQUIRE_TEAM, requireTeam);
             tag.putInt(KEY_BUILD_ABOVE, buildHeightAboveFace);
             tag.putInt(KEY_BUILD_BELOW, buildDepthBelowFace);
@@ -430,6 +460,8 @@ public final class ChunkRuleRuntimeStore {
                     tag.getString(KEY_OWNER_TEAM),
                     tag.getString(KEY_NAME),
                     tag.getBoolean(KEY_ASSIGN_ROLE),
+                    tag.contains(KEY_ROLE_NAME) ? tag.getString(KEY_ROLE_NAME) : "",
+                    tag.contains(KEY_ROLE_COLOR) ? tag.getInt(KEY_ROLE_COLOR) : 0xFFFFFF,
                     tag.getBoolean(KEY_REQUIRE_TEAM),
                     tag.getInt(KEY_BUILD_ABOVE),
                     tag.getInt(KEY_BUILD_BELOW),

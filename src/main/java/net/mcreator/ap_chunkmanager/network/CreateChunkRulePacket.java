@@ -1,11 +1,13 @@
 package net.mcreator.ap_chunkmanager.network;
 
+import net.mcreator.ap_chunkmanager.APChunkManagerMod;
 import net.mcreator.ap_chunkmanager.server.ChunkRuleRuntimeStore;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraftforge.network.NetworkDirection;
 import net.minecraftforge.network.NetworkEvent;
+import net.minecraftforge.network.PacketDistributor;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -14,6 +16,8 @@ import java.util.function.Supplier;
 public record CreateChunkRulePacket(
         String name,
         boolean assignRoleToChunk,
+    String roleName,
+    int roleColorRgb,
         boolean requireTeam,
         int buildHeightAboveFace,
         int buildDepthBelowFace,
@@ -28,6 +32,7 @@ public record CreateChunkRulePacket(
 ) {
     public CreateChunkRulePacket {
         name = name == null ? "" : name;
+        roleName = roleName == null ? "" : roleName;
     rewardResource = rewardResource == null ? "minecraft:air" : rewardResource;
     costResource = costResource == null ? "minecraft:air" : costResource;
         selectedChunks = List.copyOf(selectedChunks == null ? List.of() : selectedChunks);
@@ -36,6 +41,8 @@ public record CreateChunkRulePacket(
     public static void encode(CreateChunkRulePacket message, FriendlyByteBuf buffer) {
         buffer.writeUtf(message.name, 64);
         buffer.writeBoolean(message.assignRoleToChunk);
+        buffer.writeUtf(message.roleName, 64);
+        buffer.writeInt(message.roleColorRgb);
         buffer.writeBoolean(message.requireTeam);
         buffer.writeVarInt(message.buildHeightAboveFace);
         buffer.writeVarInt(message.buildDepthBelowFace);
@@ -57,6 +64,8 @@ public record CreateChunkRulePacket(
     public static CreateChunkRulePacket decode(FriendlyByteBuf buffer) {
         String name = buffer.readUtf(64);
         boolean assignRoleToChunk = buffer.readBoolean();
+        String roleName = buffer.readUtf(64);
+        int roleColorRgb = buffer.readInt();
         boolean requireTeam = buffer.readBoolean();
         int buildHeightAboveFace = buffer.readVarInt();
         int buildDepthBelowFace = buffer.readVarInt();
@@ -77,6 +86,8 @@ public record CreateChunkRulePacket(
         return new CreateChunkRulePacket(
                 name,
                 assignRoleToChunk,
+                roleName,
+                roleColorRgb,
                 requireTeam,
                 buildHeightAboveFace,
                 buildDepthBelowFace,
@@ -104,7 +115,11 @@ public record CreateChunkRulePacket(
                 return;
             }
 
-            ChunkRuleRuntimeStore.storeRule(player, message);
+            ChunkRuleRuntimeStore.StoreFeedback feedback = ChunkRuleRuntimeStore.storeRule(player, message);
+            APChunkManagerMod.NETWORK.send(
+                    PacketDistributor.PLAYER.with(() -> player),
+                    new ChunkRuleCreateResultPacket(feedback.success(), feedback.message())
+            );
         });
         context.setPacketHandled(true);
     }

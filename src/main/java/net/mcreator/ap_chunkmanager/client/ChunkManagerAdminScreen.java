@@ -5,6 +5,7 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
 import net.mcreator.ap_chunkmanager.APChunkManagerMod;
 import net.minecraft.client.gui.components.AbstractSliderButton;
+import net.mcreator.ap_chunkmanager.network.CopyChunkMapSectionPacket;
 import net.mcreator.ap_chunkmanager.network.CreateChunkRulePacket;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
@@ -41,8 +42,8 @@ public class ChunkManagerAdminScreen extends Screen {
     private static final int ATTR_ROW_GAP = 8;
     private static final int WINDOW_MAX_W = 1160;
     private static final int WINDOW_MAX_H = 700;
-    private static final int MAP_CONTROLS_H = 172;
-    private static final int MAP_INFO_PANEL_H = 80;
+    private static final int MAP_CONTROLS_H = 148;
+    private static final int MAP_INFO_PANEL_H = 62;
 
     private static final byte MIN_SCALE = 0;
     private static final byte MAX_SCALE = 4;
@@ -104,11 +105,14 @@ public class ChunkManagerAdminScreen extends Screen {
     private int mapSettingsContentHeight;
 
     private Button createChunkButton;
+    private Button teamManagerButton;
     private Button gridButton;
-    private Button minimapSizeButton;
+    private Button minimapScaleButton;
     private Button centerOnPlayerButton;
     private EditBox nameEdit;
-    private Checkbox assignRoleCheckbox;
+    private Button rolePickerButton;
+    private String selectedRoleName = "";
+    private int selectedRoleColor = 0xFFFFFF;
     private Button teamRequirementButton;
     private TeamRequirement teamRequirement = TeamRequirement.REQUIRE_TEAM;
     private EditBox buildHeightAboveFaceEdit;
@@ -172,20 +176,20 @@ public class ChunkManagerAdminScreen extends Screen {
         super.init();
         layoutPanels();
         registryEntries = buildRegistryEntries();
-        mapSettingsContentHeight = 116;
+        mapSettingsContentHeight = 112;
 
         gridButton = addRenderableWidget(
             Button.builder(Component.empty(), b -> {
                 ChunkManagerClientState.toggleGrid();
                 updateMapControlButtonLabels();
-            }).bounds(mapControlsX + PANEL_PADDING, mapControlsY + 70, 120, 20).build()
+            }).bounds(mapControlsX + PANEL_PADDING, mapControlsY + 70, mapControlsW - (PANEL_PADDING * 2), 20).build()
         );
 
-        minimapSizeButton = addRenderableWidget(
+        minimapScaleButton = addRenderableWidget(
             Button.builder(Component.empty(), b -> {
-                ChunkManagerClientState.cycleMinimapSize();
+                ChunkManagerClientState.cycleMinimapScale();
                 updateMapControlButtonLabels();
-            }).bounds(mapControlsX + PANEL_PADDING + 124, mapControlsY + 70, mapControlsW - (PANEL_PADDING * 2) - 124, 20).build()
+            }).bounds(mapControlsX + PANEL_PADDING, mapControlsY + 70, mapControlsW - (PANEL_PADDING * 2), 20).build()
         );
 
         centerOnPlayerButton = addRenderableWidget(
@@ -203,8 +207,14 @@ public class ChunkManagerAdminScreen extends Screen {
         if (isAdminMode) {
             createChunkButton = addRenderableWidget(
                     Button.builder(Component.literal("Create Chunk"), button -> submitCreateChunkRule())
-                            .bounds(controlsX + PANEL_PADDING, controlsY + PANEL_PADDING, controlsW - (PANEL_PADDING * 2), 22)
+                    .bounds(controlsX + PANEL_PADDING, controlsY + PANEL_PADDING, controlsW - (PANEL_PADDING * 2), 22)
                             .build()
+            );
+
+            teamManagerButton = addRenderableWidget(
+                Button.builder(Component.literal("Team Manager"), button -> openTeamManager())
+                    .bounds(controlsX + PANEL_PADDING, controlsY + PANEL_PADDING, controlsW - (PANEL_PADDING * 2), 22)
+                    .build()
             );
 
             int contentY = PANEL_PADDING + 30;
@@ -215,9 +225,13 @@ public class ChunkManagerAdminScreen extends Screen {
             addAttributeField(Component.literal("Name"), nameEdit, contentY);
             contentY += ATTR_LABEL_HEIGHT + ATTR_ROW_HEIGHT + ATTR_ROW_GAP;
 
-            assignRoleCheckbox = addRenderableWidget(new Checkbox(fieldX, attributesY, fieldW, 20, Component.literal("Assign @Role to chunk"), false));
-            addAttributeField(Component.literal(""), assignRoleCheckbox, contentY);
-            contentY += ATTR_ROW_HEIGHT + ATTR_ROW_GAP;
+                rolePickerButton = addRenderableWidget(
+                    Button.builder(Component.empty(), b -> openChunkRolePicker())
+                        .bounds(fieldX, attributesY, fieldW, 20)
+                        .build()
+                );
+                addAttributeField(Component.literal("Chunk Role"), rolePickerButton, contentY);
+                contentY += ATTR_LABEL_HEIGHT + ATTR_ROW_HEIGHT + ATTR_ROW_GAP;
 
             teamRequirementButton = addRenderableWidget(
                 Button.builder(teamRequirement.label(), button -> {
@@ -290,8 +304,11 @@ public class ChunkManagerAdminScreen extends Screen {
             attributesContentHeight = contentY + PANEL_PADDING;
         } else {
             createChunkButton = null;
+            teamManagerButton = null;
+            rolePickerButton = null;
             attributesContentHeight = 0;
         }
+        updateRolePickerButtonLabel();
         updateAttributeFieldPositions();
     }
 
@@ -309,8 +326,8 @@ public class ChunkManagerAdminScreen extends Screen {
         if (gridButton != null) {
             gridButton.setMessage(Component.literal("Grid: " + (ChunkManagerClientState.isGridEnabled() ? "ON" : "OFF")));
         }
-        if (minimapSizeButton != null) {
-            minimapSizeButton.setMessage(Component.literal("Minimap size: " + ChunkManagerClientState.getMinimapSize()));
+        if (minimapScaleButton != null) {
+            minimapScaleButton.setMessage(Component.literal("Minimap scale: " + ChunkManagerClientState.getMinimapScale()));
         }
     }
 
@@ -324,48 +341,54 @@ public class ChunkManagerAdminScreen extends Screen {
     }
 
     private void updateFixedWidgetPositions() {
-        if (!isAdminMode) {
-            return;
-        }
-
         if (createChunkButton != null) {
+            int buttonGap = 6;
+            int halfW = Math.max(72, (controlsW - (PANEL_PADDING * 2) - buttonGap) / 2);
             createChunkButton.setX(controlsX + PANEL_PADDING);
             createChunkButton.setY(controlsY + PANEL_PADDING);
-            createChunkButton.setWidth(controlsW - (PANEL_PADDING * 2));
+            createChunkButton.setWidth(halfW);
+        }
+
+        if (teamManagerButton != null) {
+            int buttonGap = 6;
+            int halfW = Math.max(72, (controlsW - (PANEL_PADDING * 2) - buttonGap) / 2);
+            teamManagerButton.setX(controlsX + PANEL_PADDING + halfW + buttonGap);
+            teamManagerButton.setY(controlsY + PANEL_PADDING);
+            teamManagerButton.setWidth(halfW);
         }
 
         int left = mapControlsX + PANEL_PADDING;
         int innerW = Math.max(80, mapControlsW - (PANEL_PADDING * 2));
-        int colGap = 6;
-        int colW = (innerW - colGap) / 2;
         int settingsViewportY = mapControlsY + MAP_INFO_PANEL_H + 6;
         int settingsViewportH = Math.max(24, mapControlsH - MAP_INFO_PANEL_H - 10);
         int maxScroll = Math.max(0, mapSettingsContentHeight - settingsViewportH);
         mapSettingsScrollOffset = Mth.clamp(mapSettingsScrollOffset, 0, maxScroll);
 
         int contentY = settingsViewportY - mapSettingsScrollOffset;
-        int row1Y = contentY + 20;
-        int row2Y = contentY + 44;
+        int rowMinimapScaleY = contentY + 10;
+        int rowCenterY = rowMinimapScaleY + 22;
+        int rowGridY = rowCenterY + 22;
 
         if (gridButton != null) {
             gridButton.setX(left);
-            gridButton.setY(row1Y);
-            gridButton.setWidth(colW);
-            gridButton.visible = row1Y >= settingsViewportY - 2 && (row1Y + 20) <= (settingsViewportY + settingsViewportH + 2);
+            gridButton.setY(rowGridY);
+            gridButton.setWidth(innerW);
+            gridButton.visible = rowGridY >= settingsViewportY - 2 && (rowGridY + 20) <= (settingsViewportY + settingsViewportH + 2);
             gridButton.active = gridButton.visible;
         }
-        if (minimapSizeButton != null) {
-            minimapSizeButton.setX(left + colW + colGap);
-            minimapSizeButton.setY(row1Y);
-            minimapSizeButton.setWidth(colW);
-            minimapSizeButton.visible = row1Y >= settingsViewportY - 2 && (row1Y + 20) <= (settingsViewportY + settingsViewportH + 2);
-            minimapSizeButton.active = minimapSizeButton.visible;
+        if (minimapScaleButton != null) {
+            minimapScaleButton.setX(left);
+            minimapScaleButton.setY(rowMinimapScaleY);
+            minimapScaleButton.setWidth(innerW);
+            minimapScaleButton.visible = rowMinimapScaleY >= settingsViewportY - 2
+                    && (rowMinimapScaleY + 20) <= (settingsViewportY + settingsViewportH + 2);
+            minimapScaleButton.active = minimapScaleButton.visible;
         }
         if (centerOnPlayerButton != null) {
             centerOnPlayerButton.setX(left);
-            centerOnPlayerButton.setY(row2Y);
+            centerOnPlayerButton.setY(rowCenterY);
             centerOnPlayerButton.setWidth(innerW);
-            centerOnPlayerButton.visible = row2Y >= settingsViewportY - 2 && (row2Y + 20) <= (settingsViewportY + settingsViewportH + 2);
+            centerOnPlayerButton.visible = rowCenterY >= settingsViewportY - 2 && (rowCenterY + 20) <= (settingsViewportY + settingsViewportH + 2);
             centerOnPlayerButton.active = centerOnPlayerButton.visible;
         }
     }
@@ -403,10 +426,10 @@ public class ChunkManagerAdminScreen extends Screen {
         mapX = windowX;
         mapY = windowY;
         mapW = leftW;
-        mapH = Math.max(180, windowH - MAP_CONTROLS_H - 10);
+        mapH = Math.max(120, windowH - MAP_CONTROLS_H - 6);
 
         mapControlsX = mapX;
-        mapControlsY = mapY + mapH + 10;
+        mapControlsY = mapY + mapH + 6;
         mapControlsW = leftW;
         mapControlsH = MAP_CONTROLS_H;
 
@@ -557,6 +580,19 @@ public class ChunkManagerAdminScreen extends Screen {
             panStartCenterX = centerBlockX;
             panStartCenterZ = centerBlockZ;
             return true;
+        }
+
+        if (button == 2 && isInsideMap(mouseX, mouseY)) {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.player != null && mc.level != null) {
+                double localX = Mth.clamp((mouseX - mapX) / Math.max(1.0, mapW), 0.0, 1.0);
+                double localZ = Mth.clamp((mouseY - mapY) / Math.max(1.0, mapH), 0.0, 1.0);
+                double targetWorldX = worldLeft + (localX * worldSpan);
+                double targetWorldZ = worldTop + (localZ * worldSpan);
+
+                APChunkManagerMod.NETWORK.sendToServer(new CopyChunkMapSectionPacket(targetWorldX, targetWorldZ, currentMapScale));
+                return true;
+            }
         }
 
         if (button == 1 && isInsideMap(mouseX, mouseY)) {
@@ -734,13 +770,13 @@ public class ChunkManagerAdminScreen extends Screen {
             renderMapTiles(guiGraphics, mc);
             PoseStack selectionPose = guiGraphics.pose();
             selectionPose.pushPose();
-            selectionPose.translate(0.0f, 0.0f, 10.0f);
+            selectionPose.translate(0.0f, 0.0f, 140.0f);
             renderChunkSelectionOverlay(guiGraphics);
             selectionPose.popPose();
 
             PoseStack gridPose = guiGraphics.pose();
             gridPose.pushPose();
-            gridPose.translate(0.0f, 0.0f, 50.0f);
+            gridPose.translate(0.0f, 0.0f, 150.0f);
             if (ChunkManagerClientState.isGridEnabled() && zoomRadiusBlocks <= 400.0) {
                 renderChunkGridOverlay(guiGraphics);
             }
@@ -1072,6 +1108,18 @@ public class ChunkManagerAdminScreen extends Screen {
                 color,
                 false
         );
+
+            if (ChunkManagerClientState.hasChunkCreateFeedback()) {
+                int feedbackY = textY - 14;
+                guiGraphics.drawString(
+                    this.font,
+                    Component.literal(ChunkManagerClientState.getChunkCreateFeedbackMessage()),
+                    textX,
+                    feedbackY,
+                    ChunkManagerClientState.getChunkCreateFeedbackColor(),
+                    false
+                );
+            }
     }
 
     private void renderAttributeLabels(GuiGraphics guiGraphics) {
@@ -1316,7 +1364,7 @@ public class ChunkManagerAdminScreen extends Screen {
     }
 
     private void submitCreateChunkRule() {
-        if (!isAdminMode || minecraft == null || minecraft.player == null || nameEdit == null || assignRoleCheckbox == null || teamRequirementButton == null
+        if (!isAdminMode || minecraft == null || minecraft.player == null || nameEdit == null || teamRequirementButton == null
                 || buildHeightAboveFaceEdit == null || buildDepthBelowFaceEdit == null || initialChunkQuotaEdit == null || chunkRewardResourceEdit == null
                 || chunkRewardAmountEdit == null || chunkCostResourceEdit == null || chunkCostAmountEdit == null || allowBuildCheckbox == null) {
             return;
@@ -1329,9 +1377,12 @@ public class ChunkManagerAdminScreen extends Screen {
         int buildHeightAboveFace = Mth.clamp(parseInteger(buildHeightAboveFaceEdit.getValue(), 64), 0, 384);
         int buildDepthBelowFace = Mth.clamp(parseInteger(buildDepthBelowFaceEdit.getValue(), 8), 0, 384);
 
+        boolean assignRoleToChunk = !selectedRoleName.isBlank();
         CreateChunkRulePacket packet = new CreateChunkRulePacket(
                 nameEdit.getValue().trim(),
-                assignRoleCheckbox.selected(),
+            assignRoleToChunk,
+            selectedRoleName,
+            selectedRoleColor,
                 teamRequirement == TeamRequirement.REQUIRE_TEAM,
                 buildHeightAboveFace,
                 buildDepthBelowFace,
@@ -1346,7 +1397,39 @@ public class ChunkManagerAdminScreen extends Screen {
         );
 
         APChunkManagerMod.NETWORK.sendToServer(packet);
-        minecraft.player.displayClientMessage(Component.literal("Chunk rule sent: " + chunkPositions.size() + " chunks"), true);
+        ChunkManagerClientState.setChunkCreateFeedback("Creating chunks...", 0xFF9FC2E5, 2200L);
+    }
+
+    private void openTeamManager() {
+        if (minecraft == null) {
+            return;
+        }
+        minecraft.setScreen(new TeamManagerScreen(this));
+    }
+
+    private void openChunkRolePicker() {
+        if (minecraft == null) {
+            return;
+        }
+        minecraft.setScreen(new ChunkRolePickerScreen(this, selectedRoleName, selectedRoleColor));
+    }
+
+    public void setSelectedChunkRole(String roleName, int roleColorRgb) {
+        selectedRoleName = roleName == null ? "" : roleName.trim();
+        selectedRoleColor = roleColorRgb & 0xFFFFFF;
+        updateRolePickerButtonLabel();
+    }
+
+    private void updateRolePickerButtonLabel() {
+        if (rolePickerButton == null) {
+            return;
+        }
+
+        if (selectedRoleName.isBlank()) {
+            rolePickerButton.setMessage(Component.literal("Role: None (Select/Create)"));
+        } else {
+            rolePickerButton.setMessage(Component.literal("Role: " + selectedRoleName + "  #" + String.format("%06X", selectedRoleColor)));
+        }
     }
 
     private int getSelectedChunkColorRgb() {

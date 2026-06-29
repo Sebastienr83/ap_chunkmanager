@@ -68,5 +68,26 @@ public class APChunkManagerMod {
             net.mcreator.ap_chunkmanager.network.ChunkClaimInfoPacket::decode,
             net.mcreator.ap_chunkmanager.network.ChunkClaimInfoPacket::handle
         );
+        NETWORK.registerMessage(
+            nextPacketId++,
+            net.mcreator.ap_chunkmanager.network.TeamManagerActionPacket.class,
+            net.mcreator.ap_chunkmanager.network.TeamManagerActionPacket::encode,
+            net.mcreator.ap_chunkmanager.network.TeamManagerActionPacket::decode,
+            net.mcreator.ap_chunkmanager.network.TeamManagerActionPacket::handle
+        );
+        NETWORK.registerMessage(
+            nextPacketId++,
+            net.mcreator.ap_chunkmanager.network.TeamManagerSyncPacket.class,
+            net.mcreator.ap_chunkmanager.network.TeamManagerSyncPacket::encode,
+            net.mcreator.ap_chunkmanager.network.TeamManagerSyncPacket::decode,
+            net.mcreator.ap_chunkmanager.network.TeamManagerSyncPacket::handle
+        );
+        NETWORK.registerMessage(
+            nextPacketId++,
+            net.mcreator.ap_chunkmanager.network.ChunkRuleCreateResultPacket.class,
+            net.mcreator.ap_chunkmanager.network.ChunkRuleCreateResultPacket::encode,
+            net.mcreator.ap_chunkmanager.network.ChunkRuleCreateResultPacket::decode,
+            net.mcreator.ap_chunkmanager.network.ChunkRuleCreateResultPacket::handle
+        );
     }
 }
