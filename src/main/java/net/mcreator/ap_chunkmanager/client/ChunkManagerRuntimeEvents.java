@@ -5,6 +5,7 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.math.Axis;
 import net.mcreator.ap_chunkmanager.APChunkManagerMod;
+import net.mcreator.ap_chunkmanager.network.RequestChunkClaimInfoPacket;
 import net.mcreator.ap_chunkmanager.network.RequestMapTileDataPacket;
 import net.minecraft.core.BlockPos;
 import net.minecraft.client.Minecraft;
@@ -43,6 +44,9 @@ public final class ChunkManagerRuntimeEvents {
     private static final Map<Long, MapScanState> SCAN_STATE_BY_MAP = new HashMap<>();
     private static final Map<Integer, MapItemSavedData> VIRTUAL_MAPS = new HashMap<>();
     private static final Map<Integer, Long> LAST_TILE_REQUEST_MS = new HashMap<>();
+    private static final long CLAIM_INFO_REQUEST_COOLDOWN_MS = 250L;
+    private static final Map<Long, Long> LAST_CLAIM_REQUEST_MS = new HashMap<>();
+    private static final Map<Long, ChunkClaimInfo> CLAIM_INFO_CACHE = new HashMap<>();
 
     private ChunkManagerRuntimeEvents() {
     }
@@ -59,10 +63,10 @@ public final class ChunkManagerRuntimeEvents {
         }
 
         while (ChunkManagerKeyMappings.OPEN_FULLMAP_KEY.consumeClick()) {
-            if (mc.screen instanceof ChunkManagerMapScreen) {
+            if (mc.screen instanceof ChunkManagerAdminScreen) {
                 mc.setScreen(null);
             } else {
-                mc.setScreen(new ChunkManagerMapScreen());
+                mc.setScreen(new ChunkManagerAdminScreen());
             }
         }
 
@@ -280,7 +284,7 @@ public final class ChunkManagerRuntimeEvents {
     private record HudTileBounds(int minGridX, int minGridZ, int maxGridX, int maxGridZ, double tileOverlapPixels) {
     }
 
-    public static MapItemSavedData getVirtualMapData(Minecraft mc, double playerX, double playerZ, byte schaal, int mapId) {
+    public static MapItemSavedData getVirtualMapData(Minecraft mc, double playerX, double playerZ, byte scale, int mapId) {
         if (mc == null || mc.level == null) {
             return null;
         }
@@ -290,13 +294,13 @@ public final class ChunkManagerRuntimeEvents {
             return cached;
         }
 
-        int blockSize = 128 * (1 << schaal);
+        int blockSize = 128 * (1 << scale);
         int gridX = Math.floorDiv((int) playerX, blockSize);
         int gridZ = Math.floorDiv((int) playerZ, blockSize);
 
-        int centrumX = (gridX * blockSize) + (blockSize / 2);
-        int centrumZ = (gridZ * blockSize) + (blockSize / 2);
-        MapItemSavedData mapData = MapItemSavedData.createFresh(centrumX, centrumZ, schaal, true, true, mc.level.dimension());
+        int centerX = (gridX * blockSize) + (blockSize / 2);
+        int centerZ = (gridZ * blockSize) + (blockSize / 2);
+        MapItemSavedData mapData = MapItemSavedData.createFresh(centerX, centerZ, scale, true, true, mc.level.dimension());
         VIRTUAL_MAPS.put(mapId, mapData);
         return mapData;
     }
@@ -354,13 +358,13 @@ public final class ChunkManagerRuntimeEvents {
         return mapItem;
     }
 
-    public static int calculateVirtualMapId(double playerX, double playerZ, byte schaal) {
-        int base = calculateBaseMapHash(playerX, playerZ, schaal);
+    public static int calculateVirtualMapId(double playerX, double playerZ, byte scale) {
+        int base = calculateBaseMapHash(playerX, playerZ, scale);
         return -(base + 1);
     }
 
-    public static int calculatePhysicalMapId(double playerX, double playerZ, byte schaal) {
-        return calculateBaseMapHash(playerX, playerZ, schaal);
+    public static int calculatePhysicalMapId(double playerX, double playerZ, byte scale) {
+        return calculateBaseMapHash(playerX, playerZ, scale);
     }
 
     public static boolean hasRenderableData(MapItemSavedData mapData) {
@@ -418,14 +422,58 @@ public final class ChunkManagerRuntimeEvents {
         LAST_TILE_REQUEST_MS.remove(mapId);
     }
 
-    private static int calculateBaseMapHash(double playerX, double playerZ, byte schaal) {
-        int blockSize = 128 * (1 << schaal);
+    public static void requestChunkClaimInfo(Minecraft mc, int chunkX, int chunkZ) {
+        if (mc == null || mc.player == null || mc.level == null) {
+            return;
+        }
+
+        long key = packChunk(chunkX, chunkZ);
+        long now = System.currentTimeMillis();
+        long lastRequest = LAST_CLAIM_REQUEST_MS.getOrDefault(key, 0L);
+        if ((now - lastRequest) < CLAIM_INFO_REQUEST_COOLDOWN_MS) {
+            return;
+        }
+
+        LAST_CLAIM_REQUEST_MS.put(key, now);
+        APChunkManagerMod.NETWORK.sendToServer(new RequestChunkClaimInfoPacket(chunkX, chunkZ));
+    }
+
+    public static ChunkClaimInfo getCachedChunkClaimInfo(int chunkX, int chunkZ) {
+        return CLAIM_INFO_CACHE.get(packChunk(chunkX, chunkZ));
+    }
+
+    public static void applyServerChunkClaimInfo(int chunkX, int chunkZ, boolean claimed, String chunkName, String teamName, String roleName,
+            String ownerName) {
+        long key = packChunk(chunkX, chunkZ);
+        LAST_CLAIM_REQUEST_MS.remove(key);
+
+        if (!claimed) {
+            CLAIM_INFO_CACHE.remove(key);
+            return;
+        }
+
+        CLAIM_INFO_CACHE.put(key, new ChunkClaimInfo(chunkX, chunkZ, safe(chunkName), safe(teamName), safe(roleName), safe(ownerName)));
+    }
+
+    private static String safe(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static long packChunk(int chunkX, int chunkZ) {
+        return (((long) chunkX) << 32) ^ (chunkZ & 0xFFFFFFFFL);
+    }
+
+    public record ChunkClaimInfo(int chunkX, int chunkZ, String chunkName, String teamName, String roleName, String ownerName) {
+    }
+
+    private static int calculateBaseMapHash(double playerX, double playerZ, byte scale) {
+        int blockSize = 128 * (1 << scale);
         int gridX = Math.floorDiv((int) playerX, blockSize);
         int gridZ = Math.floorDiv((int) playerZ, blockSize);
 
         long packed = ((((long) gridX) & 0xffffffffL) << 32)
                 ^ (((long) gridZ) & 0xffffffffL)
-                ^ ((((long) schaal) & 0xffL) << 56);
+                ^ ((((long) scale) & 0xffL) << 56);
 
         // Strong 64-bit mix avoids frequent collisions across scales and far-away grid coordinates.
         long mixed = packed;

@@ -47,5 +47,26 @@ public class APChunkManagerMod {
             net.mcreator.ap_chunkmanager.network.MapTileDataPacket::decode,
             net.mcreator.ap_chunkmanager.network.MapTileDataPacket::handle
         );
+        NETWORK.registerMessage(
+            nextPacketId++,
+            net.mcreator.ap_chunkmanager.network.CreateChunkRulePacket.class,
+            net.mcreator.ap_chunkmanager.network.CreateChunkRulePacket::encode,
+            net.mcreator.ap_chunkmanager.network.CreateChunkRulePacket::decode,
+            net.mcreator.ap_chunkmanager.network.CreateChunkRulePacket::handle
+        );
+        NETWORK.registerMessage(
+            nextPacketId++,
+            net.mcreator.ap_chunkmanager.network.RequestChunkClaimInfoPacket.class,
+            net.mcreator.ap_chunkmanager.network.RequestChunkClaimInfoPacket::encode,
+            net.mcreator.ap_chunkmanager.network.RequestChunkClaimInfoPacket::decode,
+            net.mcreator.ap_chunkmanager.network.RequestChunkClaimInfoPacket::handle
+        );
+        NETWORK.registerMessage(
+            nextPacketId++,
+            net.mcreator.ap_chunkmanager.network.ChunkClaimInfoPacket.class,
+            net.mcreator.ap_chunkmanager.network.ChunkClaimInfoPacket::encode,
+            net.mcreator.ap_chunkmanager.network.ChunkClaimInfoPacket::decode,
+            net.mcreator.ap_chunkmanager.network.ChunkClaimInfoPacket::handle
+        );
     }
 }
