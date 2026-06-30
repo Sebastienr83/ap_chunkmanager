@@ -26,6 +26,13 @@ public class ChunkRolePickerScreen extends Screen {
     private int panelY;
     private int panelW;
     private int panelH;
+    private int listX;
+    private int listY;
+    private int listW;
+    private int listH;
+    private int createX;
+    private int createY;
+    private int createW;
 
     private int listScrollOffset;
     private List<String> filteredRoles = List.of();
@@ -38,21 +45,35 @@ public class ChunkRolePickerScreen extends Screen {
     @Override
     protected void init() {
         super.init();
-        panelW = Math.min(500, this.width - 80);
-        panelH = Math.min(360, this.height - 80);
+        panelW = Math.min(860, this.width - 56);
+        panelH = Math.min(420, this.height - 56);
         panelX = (this.width - panelW) / 2;
         panelY = (this.height - panelH) / 2;
 
-        searchEdit = addRenderableWidget(new EditBox(this.font, panelX + 12, panelY + 24, panelW - 24, 20, Component.literal("Search role")));
+        int contentY = panelY + 24;
+        int contentH = panelH - 74;
+        int colGap = 14;
+        listW = Math.max(220, (int) (panelW * 0.58));
+        createW = panelW - listW - colGap - 24;
+        listX = panelX + 12;
+        createX = listX + listW + colGap;
+
+        listY = contentY + 26;
+        listH = Math.max(90, contentH - 26);
+        createY = contentY;
+
+        searchEdit = addRenderableWidget(new EditBox(this.font, listX, contentY, listW, 20, Component.literal("Search role")));
         searchEdit.setHint(Component.literal("Search role"));
         searchEdit.setResponder(value -> refreshFilter());
 
-        newRoleNameEdit = addRenderableWidget(new EditBox(this.font, panelX + 12, panelY + panelH - 66, 200, 20, Component.literal("New role")));
+        newRoleNameEdit = addRenderableWidget(new EditBox(this.font, createX, createY + 22, createW, 20, Component.literal("New role")));
         newRoleNameEdit.setHint(Component.literal("New role name"));
 
-        redEdit = addRenderableWidget(new EditBox(this.font, panelX + 220, panelY + panelH - 66, 40, 20, Component.literal("R")));
-        greenEdit = addRenderableWidget(new EditBox(this.font, panelX + 264, panelY + panelH - 66, 40, 20, Component.literal("G")));
-        blueEdit = addRenderableWidget(new EditBox(this.font, panelX + 308, panelY + panelH - 66, 40, 20, Component.literal("B")));
+        int rgbY = createY + 58;
+        int rgbW = (createW - 8) / 3;
+        redEdit = addRenderableWidget(new EditBox(this.font, createX, rgbY, rgbW, 20, Component.literal("R")));
+        greenEdit = addRenderableWidget(new EditBox(this.font, createX + rgbW + 4, rgbY, rgbW, 20, Component.literal("G")));
+        blueEdit = addRenderableWidget(new EditBox(this.font, createX + ((rgbW + 4) * 2), rgbY, rgbW, 20, Component.literal("B")));
         redEdit.setFilter(v -> v.matches("\\d{0,3}"));
         greenEdit.setFilter(v -> v.matches("\\d{0,3}"));
         blueEdit.setFilter(v -> v.matches("\\d{0,3}"));
@@ -61,13 +82,13 @@ public class ChunkRolePickerScreen extends Screen {
         blueEdit.setValue("255");
 
         addRenderableWidget(Button.builder(Component.literal("Create + Select"), b -> createAndSelect())
-                .bounds(panelX + panelW - 130, panelY + panelH - 66, 118, 20)
+            .bounds(createX, createY + 90, createW, 20)
                 .build());
 
         addRenderableWidget(Button.builder(Component.literal("None"), b -> {
             parent.setSelectedChunkRole("", 0xFFFFFF);
             onClose();
-        }).bounds(panelX + 12, panelY + panelH - 32, 72, 20).build());
+        }).bounds(panelX + 12, panelY + panelH - 32, 90, 20).build());
 
         addRenderableWidget(Button.builder(Component.literal("Close"), b -> onClose())
                 .bounds(panelX + panelW - 72, panelY + panelH - 32, 60, 20)
@@ -129,10 +150,6 @@ public class ChunkRolePickerScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
-        int listX = panelX + 12;
-        int listY = panelY + 50;
-        int listW = panelW - 24;
-        int listH = panelH - 130;
         if (mouseX >= listX && mouseX <= listX + listW && mouseY >= listY && mouseY <= listY + listH) {
             int visibleRows = Math.max(1, listH / ROW_HEIGHT);
             int maxScroll = Math.max(0, filteredRoles.size() - visibleRows);
@@ -145,10 +162,6 @@ public class ChunkRolePickerScreen extends Screen {
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         if (button == 0) {
-            int listX = panelX + 12;
-            int listY = panelY + 50;
-            int listW = panelW - 24;
-            int listH = panelH - 130;
             if (mouseX >= listX && mouseX <= listX + listW && mouseY >= listY && mouseY <= listY + listH) {
                 int index = listScrollOffset + (int) ((mouseY - listY) / ROW_HEIGHT);
                 if (index >= 0 && index < filteredRoles.size()) {
@@ -170,12 +183,10 @@ public class ChunkRolePickerScreen extends Screen {
         guiGraphics.fill(panelX, panelY, panelX + panelW, panelY + panelH, 0xFF111A24);
 
         guiGraphics.drawString(this.font, Component.literal("Select Chunk Role"), panelX + 12, panelY + 8, 0xFFE4F2FF, false);
+        guiGraphics.drawString(this.font, Component.literal("Select role"), listX, listY - 14, 0xFF9FC2E5, false);
+        guiGraphics.drawString(this.font, Component.literal("Create role"), createX, createY + 4, 0xFF9FC2E5, false);
         searchEdit.render(guiGraphics, mouseX, mouseY, partialTick);
 
-        int listX = panelX + 12;
-        int listY = panelY + 50;
-        int listW = panelW - 24;
-        int listH = panelH - 130;
         guiGraphics.fill(listX, listY, listX + listW, listY + listH, 0xFF0A121B);
 
         int visibleRows = Math.max(1, listH / ROW_HEIGHT);
@@ -212,7 +223,8 @@ public class ChunkRolePickerScreen extends Screen {
         blueEdit.render(guiGraphics, mouseX, mouseY, partialTick);
 
         int previewColor = (parseRgb(redEdit) << 16) | (parseRgb(greenEdit) << 8) | parseRgb(blueEdit);
-        guiGraphics.fill(panelX + 356, panelY + panelH - 62, panelX + 376, panelY + panelH - 42, 0xFF000000 | previewColor);
+        guiGraphics.drawString(this.font, Component.literal("Preview"), createX, createY + 118, 0xFFD7E3F4, false);
+        guiGraphics.fill(createX + 48, createY + 114, createX + 66, createY + 132, 0xFF000000 | previewColor);
 
         super.render(guiGraphics, mouseX, mouseY, partialTick);
     }

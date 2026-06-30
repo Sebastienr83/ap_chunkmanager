@@ -2,6 +2,7 @@ package net.mcreator.ap_chunkmanager.server;
 
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import net.mcreator.ap_chunkmanager.APChunkManagerMod;
 import net.minecraft.commands.CommandSourceStack;
@@ -13,12 +14,18 @@ import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Mod.EventBusSubscriber(modid = APChunkManagerMod.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class ChunkRuleAdminCommands {
     private static final int PAGE_SIZE = 8;
+    private static final Map<UUID, LinkedHashSet<Long>> SELECTIONS = new ConcurrentHashMap<>();
 
     private ChunkRuleAdminCommands() {
     }
@@ -26,7 +33,7 @@ public final class ChunkRuleAdminCommands {
     @SubscribeEvent
     public static void onRegisterCommands(RegisterCommandsEvent event) {
         event.getDispatcher().register(
-                Commands.literal("apchunk")
+                Commands.literal("chunkmanager")
                         .requires(source -> source.hasPermission(2))
                         .then(Commands.literal("rules")
                                 .then(Commands.literal("list")
@@ -46,7 +53,40 @@ public final class ChunkRuleAdminCommands {
                                         .executes(ChunkRuleAdminCommands::executeRemoveAtCurrentChunk))
                                 .then(Commands.literal("clear_dimension")
                                         .executes(ChunkRuleAdminCommands::executeClearDimension)))
+                        .then(Commands.literal("select")
+                                .then(Commands.literal("here").executes(ChunkRuleAdminCommands::executeSelectHere))
+                                .then(Commands.literal("add")
+                                        .then(Commands.argument("chunkX", IntegerArgumentType.integer())
+                                                .then(Commands.argument("chunkZ", IntegerArgumentType.integer())
+                                                        .executes(ChunkRuleAdminCommands::executeSelectAdd))))
+                                .then(Commands.literal("remove")
+                                        .then(Commands.argument("chunkX", IntegerArgumentType.integer())
+                                                .then(Commands.argument("chunkZ", IntegerArgumentType.integer())
+                                                        .executes(ChunkRuleAdminCommands::executeSelectRemove))))
+                                .then(Commands.literal("clear").executes(ChunkRuleAdminCommands::executeSelectClear))
+                                .then(Commands.literal("list").executes(ChunkRuleAdminCommands::executeSelectList)))
+                        .then(Commands.literal("delete")
+                                .then(Commands.literal("selected").executes(ChunkRuleAdminCommands::executeDeleteSelected)))
+                        .then(Commands.literal("assignteam")
+                                .then(Commands.argument("team", StringArgumentType.word())
+                                        .executes(ChunkRuleAdminCommands::executeAssignTeamSelected)))
         );
+    }
+
+    private static LinkedHashSet<Long> selectionFor(ServerPlayer player) {
+        return SELECTIONS.computeIfAbsent(player.getUUID(), ignored -> new LinkedHashSet<>());
+    }
+
+    private static long packChunk(int x, int z) {
+        return (((long) x) << 32) ^ (z & 0xFFFFFFFFL);
+    }
+
+    private static int unpackX(long packed) {
+        return (int) (packed >> 32);
+    }
+
+    private static int unpackZ(long packed) {
+        return (int) packed;
     }
 
     private static int executeList(CommandContext<CommandSourceStack> context, int page) {
@@ -66,17 +106,14 @@ public final class ChunkRuleAdminCommands {
         int start = (safePage - 1) * PAGE_SIZE;
         int end = Math.min(start + PAGE_SIZE, allRules.size());
 
-        source.sendSuccess(
-            () -> Component.literal("Claims in dimension " + source.getLevel().dimension().location() + " (page " + safePage + "/" + pageCount + ")"),
-                false
-        );
+        source.sendSuccess(() -> Component.literal("Claims in dimension " + source.getLevel().dimension().location() + " (page " + safePage + "/" + pageCount + ")"),
+                false);
 
         for (int i = start; i < end; i++) {
             ChunkRuleRuntimeStore.StoredChunkRule rule = allRules.get(i);
             int minY = rule.faceY() - Math.max(0, rule.buildDepthBelowFace());
             int maxY = rule.faceY() + Math.max(0, rule.buildHeightAboveFace());
-            String line = "- chunk(" + rule.chunkX() + "," + rule.chunkZ() + ") name='" + rule.name() + "' allowBuild=" + rule.allowBuild()
-                    + " requireTeam=" + rule.requireTeam() + " ownerTeam='" + rule.ownerTeamName() + "' Y=" + minY + ".." + maxY;
+            String line = "- chunk(" + rule.chunkX() + "," + rule.chunkZ() + ") name='" + rule.name() + "' team='" + rule.ownerTeamName() + "' Y=" + minY + ".." + maxY;
             source.sendSuccess(() -> Component.literal(line), false);
         }
 
@@ -113,11 +150,8 @@ public final class ChunkRuleAdminCommands {
         int maxY = rule.faceY() + Math.max(0, rule.buildHeightAboveFace());
 
         source.sendSuccess(() -> Component.literal("Claim info for chunk(" + chunkX + "," + chunkZ + ")"), false);
-        source.sendSuccess(() -> Component.literal("name='" + rule.name() + "', owner=" + rule.owner() + ", ownerTeam='" + rule.ownerTeamName() + "'"), false);
-        source.sendSuccess(() -> Component.literal("allowBuild=" + rule.allowBuild() + ", requireTeam=" + rule.requireTeam() + ", assignRole=" + rule.assignRoleToChunk()), false);
+        source.sendSuccess(() -> Component.literal("name='" + rule.name() + "', owner=" + rule.owner() + ", team='" + rule.ownerTeamName() + "'"), false);
         source.sendSuccess(() -> Component.literal("Y-limiet=" + minY + ".." + maxY + " (faceY=" + rule.faceY() + ")"), false);
-        source.sendSuccess(() -> Component.literal("reward=" + rule.rewardResource() + " x" + rule.rewardAmount() + ", cost=" + rule.costResource() + " x" + rule.costAmount()), false);
-        source.sendSuccess(() -> Component.literal("color=#" + String.format("%06X", rule.chunkColorRgb() & 0xFFFFFF)), false);
         return Command.SINGLE_SUCCESS;
     }
 
@@ -155,6 +189,120 @@ public final class ChunkRuleAdminCommands {
         CommandSourceStack source = context.getSource();
         int removedCount = ChunkRuleRuntimeStore.clearRulesForDimension(source.getLevel());
         source.sendSuccess(() -> Component.literal("Claims removed in dimension: " + removedCount), true);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int executeSelectHere(CommandContext<CommandSourceStack> context) {
+        ServerPlayer player = context.getSource().getPlayer();
+        if (player == null) {
+            context.getSource().sendFailure(Component.literal("Run this as player."));
+            return 0;
+        }
+        ChunkPos pos = new ChunkPos(player.blockPosition());
+        selectionFor(player).add(packChunk(pos.x, pos.z));
+        context.getSource().sendSuccess(() -> Component.literal("Selected chunk(" + pos.x + "," + pos.z + ")."), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int executeSelectAdd(CommandContext<CommandSourceStack> context) {
+        ServerPlayer player = context.getSource().getPlayer();
+        if (player == null) {
+            context.getSource().sendFailure(Component.literal("Run this as player."));
+            return 0;
+        }
+
+        int chunkX = IntegerArgumentType.getInteger(context, "chunkX");
+        int chunkZ = IntegerArgumentType.getInteger(context, "chunkZ");
+        selectionFor(player).add(packChunk(chunkX, chunkZ));
+        context.getSource().sendSuccess(() -> Component.literal("Selected chunk(" + chunkX + "," + chunkZ + ")."), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int executeSelectRemove(CommandContext<CommandSourceStack> context) {
+        ServerPlayer player = context.getSource().getPlayer();
+        if (player == null) {
+            context.getSource().sendFailure(Component.literal("Run this as player."));
+            return 0;
+        }
+
+        int chunkX = IntegerArgumentType.getInteger(context, "chunkX");
+        int chunkZ = IntegerArgumentType.getInteger(context, "chunkZ");
+        selectionFor(player).remove(packChunk(chunkX, chunkZ));
+        context.getSource().sendSuccess(() -> Component.literal("Deselected chunk(" + chunkX + "," + chunkZ + ")."), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int executeSelectClear(CommandContext<CommandSourceStack> context) {
+        ServerPlayer player = context.getSource().getPlayer();
+        if (player == null) {
+            context.getSource().sendFailure(Component.literal("Run this as player."));
+            return 0;
+        }
+
+        selectionFor(player).clear();
+        context.getSource().sendSuccess(() -> Component.literal("Selection cleared."), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int executeSelectList(CommandContext<CommandSourceStack> context) {
+        ServerPlayer player = context.getSource().getPlayer();
+        if (player == null) {
+            context.getSource().sendFailure(Component.literal("Run this as player."));
+            return 0;
+        }
+
+        LinkedHashSet<Long> selected = selectionFor(player);
+        context.getSource().sendSuccess(() -> Component.literal("Selected chunks: " + selected.size()), false);
+        int shown = 0;
+        for (long packed : selected) {
+            if (shown >= 20) {
+                break;
+            }
+            int x = unpackX(packed);
+            int z = unpackZ(packed);
+            context.getSource().sendSuccess(() -> Component.literal("- chunk(" + x + "," + z + ")"), false);
+            shown++;
+        }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int executeDeleteSelected(CommandContext<CommandSourceStack> context) {
+        ServerPlayer player = context.getSource().getPlayer();
+        if (player == null) {
+            context.getSource().sendFailure(Component.literal("Run this as player."));
+            return 0;
+        }
+
+        List<ChunkPos> chunks = new ArrayList<>();
+        for (long packed : selectionFor(player)) {
+            chunks.add(new ChunkPos(unpackX(packed), unpackZ(packed)));
+        }
+
+        int removed = ChunkRuleRuntimeStore.removeRules(player.level(), chunks);
+        context.getSource().sendSuccess(() -> Component.literal("Deleted selected claims: " + removed), true);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int executeAssignTeamSelected(CommandContext<CommandSourceStack> context) {
+        ServerPlayer player = context.getSource().getPlayer();
+        if (player == null) {
+            context.getSource().sendFailure(Component.literal("Run this as player."));
+            return 0;
+        }
+
+        String teamName = StringArgumentType.getString(context, "team");
+        if (!TeamManagerRuntimeStore.teamExists(player.level(), teamName)) {
+            context.getSource().sendFailure(Component.literal("Unknown team: " + teamName));
+            return 0;
+        }
+
+        List<ChunkPos> chunks = new ArrayList<>();
+        for (long packed : selectionFor(player)) {
+            chunks.add(new ChunkPos(unpackX(packed), unpackZ(packed)));
+        }
+
+        int updated = ChunkRuleRuntimeStore.assignTeamToChunks(player.level(), chunks, teamName);
+        context.getSource().sendSuccess(() -> Component.literal("Assigned team '" + teamName + "' to claims: " + updated), true);
         return Command.SINGLE_SUCCESS;
     }
 }

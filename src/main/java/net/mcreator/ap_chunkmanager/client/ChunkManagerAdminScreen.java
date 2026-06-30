@@ -7,6 +7,7 @@ import net.mcreator.ap_chunkmanager.APChunkManagerMod;
 import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.mcreator.ap_chunkmanager.network.CopyChunkMapSectionPacket;
 import net.mcreator.ap_chunkmanager.network.CreateChunkRulePacket;
+import net.mcreator.ap_chunkmanager.network.DeleteChunkRulesPacket;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractWidget;
@@ -106,15 +107,25 @@ public class ChunkManagerAdminScreen extends Screen {
 
     private Button createChunkButton;
     private Button teamManagerButton;
+    private Button chunkManagerTabButton;
     private Button gridButton;
     private Button minimapScaleButton;
     private Button centerOnPlayerButton;
+    private Button deleteChunkButton;
     private EditBox nameEdit;
     private Button rolePickerButton;
     private String selectedRoleName = "";
     private int selectedRoleColor = 0xFFFFFF;
-    private Button teamRequirementButton;
-    private TeamRequirement teamRequirement = TeamRequirement.REQUIRE_TEAM;
+    private Button assignTeamButton;
+    private String assignedTeamName = "";
+    private boolean teamSelectorOpen;
+    private int teamSelectorScrollOffset;
+    private int teamSelectorX;
+    private int teamSelectorY;
+    private int teamSelectorW;
+    private int teamSelectorH;
+    private static final int TEAM_SELECTOR_ROW_HEIGHT = 18;
+    private List<String> teamSelectorEntries = List.of();
     private EditBox buildHeightAboveFaceEdit;
     private EditBox buildDepthBelowFaceEdit;
     private EditBox initialChunkQuotaEdit;
@@ -176,7 +187,7 @@ public class ChunkManagerAdminScreen extends Screen {
         super.init();
         layoutPanels();
         registryEntries = buildRegistryEntries();
-        mapSettingsContentHeight = 112;
+        mapSettingsContentHeight = 136;
 
         gridButton = addRenderableWidget(
             Button.builder(Component.empty(), b -> {
@@ -195,6 +206,12 @@ public class ChunkManagerAdminScreen extends Screen {
         centerOnPlayerButton = addRenderableWidget(
             Button.builder(Component.literal("Center on player"), b -> centerOnPlayer())
                 .bounds(mapControlsX + PANEL_PADDING, mapControlsY + 94, mapControlsW - (PANEL_PADDING * 2), 20)
+                .build()
+        );
+
+        deleteChunkButton = addRenderableWidget(
+            Button.builder(Component.literal("DELETE CHUNK"), b -> deleteSelectedChunks())
+                .bounds(mapControlsX + PANEL_PADDING, mapControlsY + 118, mapControlsW - (PANEL_PADDING * 2), 20)
                 .build()
         );
         updateMapControlButtonLabels();
@@ -217,6 +234,12 @@ public class ChunkManagerAdminScreen extends Screen {
                     .build()
             );
 
+            chunkManagerTabButton = addRenderableWidget(
+                Button.builder(Component.literal("Chunk Manager"), button -> openChunkManagerTab())
+                    .bounds(controlsX + PANEL_PADDING, controlsY + PANEL_PADDING, controlsW - (PANEL_PADDING * 2), 22)
+                    .build()
+            );
+
             int contentY = PANEL_PADDING + 30;
             int fieldX = attributesX + PANEL_PADDING;
             int fieldW = attributesW - (PANEL_PADDING * 2) - 8;
@@ -233,13 +256,12 @@ public class ChunkManagerAdminScreen extends Screen {
                 addAttributeField(Component.literal("Chunk Role"), rolePickerButton, contentY);
                 contentY += ATTR_LABEL_HEIGHT + ATTR_ROW_HEIGHT + ATTR_ROW_GAP;
 
-            teamRequirementButton = addRenderableWidget(
-                Button.builder(teamRequirement.label(), button -> {
-                    teamRequirement = teamRequirement == TeamRequirement.REQUIRE_TEAM ? TeamRequirement.STANDALONE : TeamRequirement.REQUIRE_TEAM;
-                    button.setMessage(teamRequirement.label());
-                }).bounds(fieldX, attributesY, fieldW, 20).build()
+            assignTeamButton = addRenderableWidget(
+                Button.builder(Component.empty(), button -> openTeamSelectorDropdown())
+                        .bounds(fieldX, attributesY, fieldW, 20)
+                        .build()
             );
-            addAttributeField(Component.literal("Team Requirement"), teamRequirementButton, contentY);
+            addAttributeField(Component.literal("Assign Team"), assignTeamButton, contentY);
             contentY += ATTR_LABEL_HEIGHT + ATTR_ROW_HEIGHT + ATTR_ROW_GAP;
 
             buildHeightAboveFaceEdit = addTextField(fieldX, fieldW, Component.literal("Build Height (Above Face)"), "64", true);
@@ -305,10 +327,13 @@ public class ChunkManagerAdminScreen extends Screen {
         } else {
             createChunkButton = null;
             teamManagerButton = null;
+            chunkManagerTabButton = null;
             rolePickerButton = null;
+            assignTeamButton = null;
             attributesContentHeight = 0;
         }
         updateRolePickerButtonLabel();
+        updateAssignTeamButtonLabel();
         updateAttributeFieldPositions();
     }
 
@@ -343,18 +368,26 @@ public class ChunkManagerAdminScreen extends Screen {
     private void updateFixedWidgetPositions() {
         if (createChunkButton != null) {
             int buttonGap = 6;
-            int halfW = Math.max(72, (controlsW - (PANEL_PADDING * 2) - buttonGap) / 2);
+            int thirdW = Math.max(68, (controlsW - (PANEL_PADDING * 2) - (buttonGap * 2)) / 3);
             createChunkButton.setX(controlsX + PANEL_PADDING);
             createChunkButton.setY(controlsY + PANEL_PADDING);
-            createChunkButton.setWidth(halfW);
+            createChunkButton.setWidth(thirdW);
         }
 
         if (teamManagerButton != null) {
             int buttonGap = 6;
-            int halfW = Math.max(72, (controlsW - (PANEL_PADDING * 2) - buttonGap) / 2);
-            teamManagerButton.setX(controlsX + PANEL_PADDING + halfW + buttonGap);
+            int thirdW = Math.max(68, (controlsW - (PANEL_PADDING * 2) - (buttonGap * 2)) / 3);
+            teamManagerButton.setX(controlsX + PANEL_PADDING + thirdW + buttonGap);
             teamManagerButton.setY(controlsY + PANEL_PADDING);
-            teamManagerButton.setWidth(halfW);
+            teamManagerButton.setWidth(thirdW);
+        }
+
+        if (chunkManagerTabButton != null) {
+            int buttonGap = 6;
+            int thirdW = Math.max(68, (controlsW - (PANEL_PADDING * 2) - (buttonGap * 2)) / 3);
+            chunkManagerTabButton.setX(controlsX + PANEL_PADDING + ((thirdW + buttonGap) * 2));
+            chunkManagerTabButton.setY(controlsY + PANEL_PADDING);
+            chunkManagerTabButton.setWidth(thirdW);
         }
 
         int left = mapControlsX + PANEL_PADDING;
@@ -390,6 +423,14 @@ public class ChunkManagerAdminScreen extends Screen {
             centerOnPlayerButton.setWidth(innerW);
             centerOnPlayerButton.visible = rowCenterY >= settingsViewportY - 2 && (rowCenterY + 20) <= (settingsViewportY + settingsViewportH + 2);
             centerOnPlayerButton.active = centerOnPlayerButton.visible;
+        }
+        int rowDeleteY = rowGridY + 22;
+        if (deleteChunkButton != null) {
+            deleteChunkButton.setX(left);
+            deleteChunkButton.setY(rowDeleteY);
+            deleteChunkButton.setWidth(innerW);
+            deleteChunkButton.visible = rowDeleteY >= settingsViewportY - 2 && (rowDeleteY + 20) <= (settingsViewportY + settingsViewportH + 2);
+            deleteChunkButton.active = deleteChunkButton.visible;
         }
     }
 
@@ -482,6 +523,16 @@ public class ChunkManagerAdminScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
+        if (teamSelectorOpen && delta != 0.0) {
+            updateTeamSelectorGeometry();
+            if (isInsideRect(mouseX, mouseY, teamSelectorX, teamSelectorY, teamSelectorW, teamSelectorH)) {
+                int visibleRows = Math.max(1, (teamSelectorH - 24) / TEAM_SELECTOR_ROW_HEIGHT);
+                int maxScroll = Math.max(0, (teamSelectorEntries.size() + 1) - visibleRows);
+                teamSelectorScrollOffset = Mth.clamp(teamSelectorScrollOffset - (int) Math.signum(delta), 0, maxScroll);
+                return true;
+            }
+        }
+
         if (selectorOpen && delta != 0.0) {
             int viewportRows = Math.max(1, (selectorH - 54) / SELECTOR_ROW_HEIGHT);
             int maxScroll = Math.max(0, selectorFilteredEntries.size() - viewportRows);
@@ -530,6 +581,36 @@ public class ChunkManagerAdminScreen extends Screen {
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (teamSelectorOpen) {
+            updateTeamSelectorGeometry();
+            if (isInsideRect(mouseX, mouseY, teamSelectorX, teamSelectorY, teamSelectorW, teamSelectorH) && button == 0) {
+                int listX = teamSelectorX + 6;
+                int listY = teamSelectorY + 18;
+                int listW = teamSelectorW - 12;
+                int listH = teamSelectorH - 24;
+                if (isInsideRect(mouseX, mouseY, listX, listY, listW, listH)) {
+                    int clicked = teamSelectorScrollOffset + (int) ((mouseY - listY) / TEAM_SELECTOR_ROW_HEIGHT);
+                    if (clicked == 0) {
+                        assignedTeamName = "";
+                        updateAssignTeamButtonLabel();
+                        closeTeamSelectorDropdown();
+                        return true;
+                    }
+                    int teamIndex = clicked - 1;
+                    if (teamIndex >= 0 && teamIndex < teamSelectorEntries.size()) {
+                        assignedTeamName = teamSelectorEntries.get(teamIndex);
+                        updateAssignTeamButtonLabel();
+                        closeTeamSelectorDropdown();
+                        return true;
+                    }
+                }
+                return true;
+            }
+
+            closeTeamSelectorDropdown();
+            return true;
+        }
+
         if (selectorOpen) {
             updateSelectorGeometry();
 
@@ -840,7 +921,7 @@ public class ChunkManagerAdminScreen extends Screen {
         renderSelectionInfo(guiGraphics);
 
         List<Component> hoverTooltip = null;
-        if (!selectorOpen && isInsideMap(mouseX, mouseY) && mc.player != null && mc.level != null) {
+        if (!selectorOpen && !teamSelectorOpen && ChunkManagerClientState.isGridEnabled() && isInsideMap(mouseX, mouseY) && mc.player != null && mc.level != null) {
             ChunkPos hoveredChunk = chunkAtMouse(mouseX, mouseY);
             if (hoveredChunk != null) {
                 ChunkManagerRuntimeEvents.requestChunkClaimInfo(mc, hoveredChunk.x, hoveredChunk.z);
@@ -851,12 +932,23 @@ public class ChunkManagerAdminScreen extends Screen {
                     hoverTooltip.add(Component.literal("Team: " + (info.teamName().isEmpty() ? "None" : info.teamName())));
                     hoverTooltip.add(Component.literal("Role: " + (info.roleName().isEmpty() ? "None" : info.roleName())));
                     hoverTooltip.add(Component.literal("Owner/Player: " + (info.ownerName().isEmpty() ? "Unknown" : info.ownerName())));
+                    if (info.hasEveryoneRole()) {
+                        String perms = "@everyone perms - B:" + (info.everyoneCanBuild() ? "Y" : "N")
+                                + " Br:" + (info.everyoneCanBreak() ? "Y" : "N")
+                                + " Blk:" + (info.everyoneCanInteractBlocks() ? "Y" : "N")
+                                + " Ent:" + (info.everyoneCanInteractEntities() ? "Y" : "N")
+                                + " C:" + (info.everyoneCanOpenContainers() ? "Y" : "N");
+                        hoverTooltip.add(Component.literal(perms).withStyle(ChatFormatting.GRAY));
+                    }
                 }
             }
         }
 
         if (selectorOpen) {
             renderSelectorOverlay(guiGraphics, mouseX, mouseY, partialTick);
+        }
+        if (teamSelectorOpen) {
+            renderTeamSelectorOverlay(guiGraphics, mouseX, mouseY);
         }
 
         super.render(guiGraphics, mouseX, mouseY, partialTick);
@@ -868,6 +960,10 @@ public class ChunkManagerAdminScreen extends Screen {
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (teamSelectorOpen && keyCode == 256) {
+            closeTeamSelectorDropdown();
+            return true;
+        }
         if (selectorOpen) {
             if (keyCode == 256) {
                 closeSelector();
@@ -1059,6 +1155,50 @@ public class ChunkManagerAdminScreen extends Screen {
         if (selectorFilteredEntries.isEmpty()) {
             guiGraphics.drawString(this.font, Component.literal("No results"), listX + 6, listY + 6, 0xFFFFA0A0, false);
         }
+    }
+
+    private void renderTeamSelectorOverlay(GuiGraphics guiGraphics, int mouseX, int mouseY) {
+        updateTeamSelectorGeometry();
+
+        guiGraphics.fill(teamSelectorX, teamSelectorY, teamSelectorX + teamSelectorW, teamSelectorY + teamSelectorH, 0xEE121E2D);
+        guiGraphics.fill(teamSelectorX, teamSelectorY, teamSelectorX + teamSelectorW, teamSelectorY + 1, 0xFF5C7EA3);
+        guiGraphics.drawString(this.font, Component.literal("Assign Team"), teamSelectorX + 6, teamSelectorY + 5, 0xFFE4F2FF, false);
+
+        int listX = teamSelectorX + 6;
+        int listY = teamSelectorY + 18;
+        int listW = teamSelectorW - 12;
+        int listH = teamSelectorH - 24;
+        guiGraphics.fill(listX, listY, listX + listW, listY + listH, 0xAA08111B);
+
+        int totalRows = teamSelectorEntries.size() + 1;
+        int visibleRows = Math.max(1, listH / TEAM_SELECTOR_ROW_HEIGHT);
+        int maxScroll = Math.max(0, totalRows - visibleRows);
+        teamSelectorScrollOffset = Mth.clamp(teamSelectorScrollOffset, 0, maxScroll);
+
+        for (int i = 0; i < visibleRows; i++) {
+            int rowIndex = teamSelectorScrollOffset + i;
+            if (rowIndex >= totalRows) {
+                break;
+            }
+
+            int y = listY + (i * TEAM_SELECTOR_ROW_HEIGHT);
+            boolean hovered = mouseX >= listX && mouseX <= listX + listW && mouseY >= y && mouseY <= y + TEAM_SELECTOR_ROW_HEIGHT;
+            int bg = hovered ? 0xFF2A4259 : ((i & 1) == 0 ? 0xFF0E1822 : 0xFF0C151E);
+            guiGraphics.fill(listX + 1, y, listX + listW - 1, y + TEAM_SELECTOR_ROW_HEIGHT - 1, bg);
+
+            String value = rowIndex == 0 ? "None" : teamSelectorEntries.get(rowIndex - 1);
+            boolean active = (rowIndex == 0 && assignedTeamName.isBlank()) || (rowIndex > 0 && value.equalsIgnoreCase(assignedTeamName));
+            int color = active ? 0xFFBEE29E : 0xFFD7E3F4;
+            guiGraphics.drawString(this.font, Component.literal(value), listX + 5, y + 5, color, false);
+        }
+
+        int trackX0 = listX + listW - 3;
+        int trackX1 = listX + listW - 1;
+        guiGraphics.fill(trackX0, listY, trackX1, listY + listH, 0x88324A60);
+        int thumbH = Math.max(12, (int) ((visibleRows / (double) Math.max(visibleRows, totalRows)) * listH));
+        int thumbTravel = Math.max(1, listH - thumbH);
+        int thumbY = listY + (int) ((teamSelectorScrollOffset / (double) Math.max(1, maxScroll)) * thumbTravel);
+        guiGraphics.fill(trackX0, thumbY, trackX1, thumbY + thumbH, 0xFF9EC5EA);
     }
 
     private static boolean isInsideRect(double mouseX, double mouseY, int x, int y, int w, int h) {
@@ -1364,7 +1504,7 @@ public class ChunkManagerAdminScreen extends Screen {
     }
 
     private void submitCreateChunkRule() {
-        if (!isAdminMode || minecraft == null || minecraft.player == null || nameEdit == null || teamRequirementButton == null
+        if (!isAdminMode || minecraft == null || minecraft.player == null || nameEdit == null || assignTeamButton == null
                 || buildHeightAboveFaceEdit == null || buildDepthBelowFaceEdit == null || initialChunkQuotaEdit == null || chunkRewardResourceEdit == null
                 || chunkRewardAmountEdit == null || chunkCostResourceEdit == null || chunkCostAmountEdit == null || allowBuildCheckbox == null) {
             return;
@@ -1383,7 +1523,8 @@ public class ChunkManagerAdminScreen extends Screen {
             assignRoleToChunk,
             selectedRoleName,
             selectedRoleColor,
-                teamRequirement == TeamRequirement.REQUIRE_TEAM,
+                assignedTeamName,
+                !assignedTeamName.isBlank(),
                 buildHeightAboveFace,
                 buildDepthBelowFace,
                 Mth.clamp(parseInteger(initialChunkQuotaEdit.getValue(), 0), 0, 4096),
@@ -1400,11 +1541,74 @@ public class ChunkManagerAdminScreen extends Screen {
         ChunkManagerClientState.setChunkCreateFeedback("Creating chunks...", 0xFF9FC2E5, 2200L);
     }
 
+    private void deleteSelectedChunks() {
+        if (minecraft == null || minecraft.player == null || selectedChunks.isEmpty()) {
+            return;
+        }
+
+        List<ChunkPos> chunkPositions = selectedChunks.stream()
+                .map(packed -> new ChunkPos(unpackChunkX(packed), unpackChunkZ(packed)))
+                .toList();
+
+        APChunkManagerMod.NETWORK.sendToServer(new DeleteChunkRulesPacket(chunkPositions));
+        ChunkManagerClientState.setChunkCreateFeedback("Deleting selected chunks...", 0xFFFFC766, 2200L);
+    }
+
+    private void openTeamSelectorDropdown() {
+        teamSelectorEntries = TeamManagerClientState.getTeams().stream()
+                .map(net.mcreator.ap_chunkmanager.network.TeamManagerSyncPacket.TeamSnapshot::name)
+                .sorted(String.CASE_INSENSITIVE_ORDER)
+                .toList();
+
+        if (teamSelectorEntries.isEmpty()) {
+            if (minecraft != null) {
+                minecraft.setScreen(new TeamManagerScreen(this));
+            }
+            return;
+        }
+
+        teamSelectorOpen = true;
+        teamSelectorScrollOffset = 0;
+        updateTeamSelectorGeometry();
+    }
+
+    private void closeTeamSelectorDropdown() {
+        teamSelectorOpen = false;
+    }
+
+    private void updateTeamSelectorGeometry() {
+        int viewportTop = attributesY + PANEL_PADDING;
+        int targetY = assignTeamButton != null ? assignTeamButton.getY() : viewportTop;
+
+        teamSelectorW = Math.max(160, attributesW - (PANEL_PADDING * 2));
+        teamSelectorH = Math.min(160, Math.max(80, attributesH - 28));
+        teamSelectorX = attributesX + PANEL_PADDING;
+        teamSelectorY = Mth.clamp(targetY + 24, viewportTop, attributesY + attributesH - teamSelectorH - PANEL_PADDING);
+    }
+
+    private void updateAssignTeamButtonLabel() {
+        if (assignTeamButton == null) {
+            return;
+        }
+        if (assignedTeamName.isBlank()) {
+            assignTeamButton.setMessage(Component.literal("Assign Team: None"));
+        } else {
+            assignTeamButton.setMessage(Component.literal("Assign Team: " + assignedTeamName));
+        }
+    }
+
     private void openTeamManager() {
         if (minecraft == null) {
             return;
         }
         minecraft.setScreen(new TeamManagerScreen(this));
+    }
+
+    private void openChunkManagerTab() {
+        if (minecraft == null) {
+            return;
+        }
+        minecraft.setScreen(new ChunkRuleManagerScreen(this));
     }
 
     private void openChunkRolePicker() {
@@ -1487,21 +1691,6 @@ public class ChunkManagerAdminScreen extends Screen {
 
     private record GridProjection(double mapStartX, double mapStartY, double panX, double panY, double gridCellSize, double zoom,
             int originChunkX, int originChunkZ) {
-    }
-
-    private enum TeamRequirement {
-        REQUIRE_TEAM(Component.literal("Require Team")),
-        STANDALONE(Component.literal("Standalone Chunk"));
-
-        private final Component label;
-
-        TeamRequirement(Component label) {
-            this.label = label;
-        }
-
-        public Component label() {
-            return label;
-        }
     }
 
     private record AttributeField(Component label, GuiEventListener listener, int contentY) {

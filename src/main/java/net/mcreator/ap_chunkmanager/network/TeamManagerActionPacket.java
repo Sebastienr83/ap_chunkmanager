@@ -21,8 +21,10 @@ public record TeamManagerActionPacket(
         REQUEST_STATE,
         CREATE_TEAM,
         UPDATE_TEAM,
+        ADD_ROLE,
         ADD_MEMBER,
-        REMOVE_MEMBER
+        REMOVE_MEMBER,
+        ASSIGN_MEMBER_ROLE
     }
 
     public TeamManagerActionPacket {

@@ -17,8 +17,10 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import org.slf4j.Logger;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 public final class ChunkRuleRuntimeStore {
@@ -26,6 +28,14 @@ public final class ChunkRuleRuntimeStore {
     private static final String DATA_KEY = "ap_chunkmanager_chunk_rules";
 
     private ChunkRuleRuntimeStore() {
+    }
+
+    public enum Permission {
+        BUILD,
+        INTERACT_BLOCK,
+        INTERACT_ENTITY,
+        BREAK,
+        OPEN_CONTAINER
     }
 
     public static StoreFeedback storeRule(ServerPlayer player, CreateChunkRulePacket packet) {
@@ -55,6 +65,10 @@ public final class ChunkRuleRuntimeStore {
     }
 
     public static BuildAccessResult canBuildAt(ServerPlayer player, BlockPos pos) {
+        return canPerform(player, pos, Permission.BUILD);
+    }
+
+    public static BuildAccessResult canPerform(ServerPlayer player, BlockPos pos, Permission permission) {
         if (player.hasPermissions(2)) {
             return BuildAccessResult.permit();
         }
@@ -65,11 +79,7 @@ public final class ChunkRuleRuntimeStore {
             return BuildAccessResult.permit();
         }
 
-        if (!rule.allowBuild()) {
-            return BuildAccessResult.deny("Building is disabled in this claim.");
-        }
-
-        if (!isPlayerAllowedByTeamRules(player, rule)) {
+        if (!isPlayerAllowedByTeamRules(player, rule, permission)) {
             return BuildAccessResult.deny("Your team/role does not satisfy this claim rule.");
         }
 
@@ -94,6 +104,26 @@ public final class ChunkRuleRuntimeStore {
         return getData(level).removeRule(level, chunkX, chunkZ);
     }
 
+    public static int removeRules(Level level, List<ChunkPos> chunks) {
+        if (level == null || chunks == null || chunks.isEmpty()) {
+            return 0;
+        }
+        int removed = 0;
+        for (ChunkPos pos : chunks) {
+            if (removeRuleAt(level, pos.x, pos.z)) {
+                removed++;
+            }
+        }
+        return removed;
+    }
+
+    public static int assignTeamToChunks(Level level, List<ChunkPos> chunks, String teamName) {
+        if (level == null || chunks == null || chunks.isEmpty() || teamName == null || teamName.isBlank()) {
+            return 0;
+        }
+        return getData(level).assignTeam(level, chunks, teamName.trim());
+    }
+
     public static int clearRulesForDimension(Level level) {
         return getData(level).clearDimension(level);
     }
@@ -105,7 +135,20 @@ public final class ChunkRuleRuntimeStore {
         }
 
         String roleName = rule.assignRoleToChunk() ? rule.roleName() : "None";
-        return new ClaimInfo(true, rule.name(), rule.ownerTeamName(), roleName, rule.ownerName());
+        RolePermissions everyone = rule.rolePermissions().getOrDefault("@everyone", RolePermissions.fromLegacyAllowBuild(rule.allowBuild()));
+        return new ClaimInfo(
+                true,
+                rule.name(),
+                rule.ownerTeamName(),
+                roleName,
+                rule.ownerName(),
+                true,
+                everyone.canBuild(),
+                everyone.canBreak(),
+                everyone.canInteractBlocks(),
+                everyone.canInteractEntities(),
+                everyone.canOpenContainers()
+        );
     }
 
     private static ValidationResult validateClaimPacket(ServerPlayer player, CreateChunkRulePacket packet) {
@@ -122,7 +165,8 @@ public final class ChunkRuleRuntimeStore {
         if (packet.requireTeam() && player.getTeam() == null) {
             return ValidationResult.deny("This rule requires a team.");
         }
-        if (packet.assignRoleToChunk() && player.getTeam() == null) {
+        boolean hasTeamContext = player.getTeam() != null || !packet.assignedTeamName().isBlank();
+        if (packet.assignRoleToChunk() && !hasTeamContext) {
             return ValidationResult.deny("Assign @Role requires that you are in a team.");
         }
         if (packet.assignRoleToChunk() && packet.roleName().isBlank()) {
@@ -133,6 +177,9 @@ public final class ChunkRuleRuntimeStore {
         }
         if (!isKnownResource(packet.costResource())) {
             return ValidationResult.deny("Unknown cost resource: " + packet.costResource());
+        }
+        if (!packet.assignedTeamName().isBlank() && !TeamManagerRuntimeStore.teamExists(player.level(), packet.assignedTeamName())) {
+            return ValidationResult.deny("Assigned team does not exist: " + packet.assignedTeamName());
         }
         if (packet.rewardAmount() < 0 || packet.costAmount() < 0) {
             return ValidationResult.deny("Reward/cost amount must not be negative.");
@@ -149,6 +196,10 @@ public final class ChunkRuleRuntimeStore {
     }
 
     private static boolean isPlayerAllowedByTeamRules(ServerPlayer player, StoredChunkRule rule) {
+        return isPlayerAllowedByTeamRules(player, rule, Permission.BUILD);
+    }
+
+    private static boolean isPlayerAllowedByTeamRules(ServerPlayer player, StoredChunkRule rule, Permission permission) {
         if (player.getUUID().equals(rule.owner())) {
             return true;
         }
@@ -162,10 +213,49 @@ public final class ChunkRuleRuntimeStore {
         if (rule.requireTeam() && !ownerTeam.isEmpty() && !ownerTeam.equals(playerTeam)) {
             return false;
         }
-        if (rule.assignRoleToChunk()) {
-            return !ownerTeam.isEmpty() && ownerTeam.equals(playerTeam);
+
+        String assignedRole = TeamManagerRuntimeStore.getAssignedRoleForPlayer(player.level(), ownerTeam, player.getGameProfile().getName());
+        String activeRole = normalizeRoleName(assignedRole.isBlank() ? "@everyone" : assignedRole);
+        RolePermissions rolePermissions = rule.rolePermissions().getOrDefault(activeRole, rule.rolePermissions().get("@everyone"));
+        if (rolePermissions == null) {
+            rolePermissions = RolePermissions.fromLegacyAllowBuild(rule.allowBuild());
         }
-        return true;
+
+        if (rule.assignRoleToChunk()) {
+            String requiredRole = normalizeRoleName(rule.roleName());
+            if (!requiredRole.isBlank() && !Objects.equals(requiredRole, activeRole)) {
+                return false;
+            }
+        }
+
+        return rolePermissions.isAllowed(permission);
+    }
+
+    private static String normalizeRoleName(String roleName) {
+        if (roleName == null) {
+            return "";
+        }
+        String trimmed = roleName.trim();
+        return trimmed.isEmpty() ? "" : trimmed.toLowerCase();
+    }
+
+    private static Map<String, RolePermissions> createDefaultRolePermissions(CreateChunkRulePacket packet) {
+        Map<String, RolePermissions> map = new LinkedHashMap<>();
+
+        boolean publicClaim = !packet.requireTeam();
+        RolePermissions everyone = new RolePermissions(
+                packet.allowBuild() && publicClaim,
+                packet.allowBuild() && publicClaim,
+                publicClaim,
+                publicClaim,
+                publicClaim
+        );
+        map.put("@everyone", everyone);
+
+        if (packet.assignRoleToChunk() && !packet.roleName().isBlank()) {
+            map.put(normalizeRoleName(packet.roleName()), RolePermissions.allAllowed());
+        }
+        return map;
     }
 
     private static ChunkRuleSavedData getData(Level level) {
@@ -258,7 +348,9 @@ public final class ChunkRuleRuntimeStore {
         SaveResult storeRule(ServerPlayer player, CreateChunkRulePacket packet) {
             String dimensionKey = player.level().dimension().location().toString();
             Map<Long, StoredChunkRule> rulesByChunk = rulesByDimension.computeIfAbsent(dimensionKey, ignored -> new HashMap<>());
-            String ownerTeam = player.getTeam() != null ? player.getTeam().getName() : "";
+                String ownerTeam = packet.assignedTeamName().isBlank()
+                    ? (player.getTeam() != null ? player.getTeam().getName() : "")
+                    : packet.assignedTeamName().trim();
 
             int quota = Math.max(0, Math.min(packet.initialChunkQuota(), 4096));
             List<ChunkPos> chunks = packet.selectedChunks().stream().limit(quota).toList();
@@ -290,6 +382,7 @@ public final class ChunkRuleRuntimeStore {
                     packet.costResource(),
                     Math.max(0, packet.costAmount()),
                         packet.allowBuild(),
+                        createDefaultRolePermissions(packet),
                         packet.chunkColorRgb(),
                         chunkPos.x,
                         chunkPos.z,
@@ -363,6 +456,29 @@ public final class ChunkRuleRuntimeStore {
             return removedCount;
         }
 
+        int assignTeam(Level level, List<ChunkPos> chunks, String teamName) {
+            String dimensionKey = level.dimension().location().toString();
+            Map<Long, StoredChunkRule> rulesByChunk = rulesByDimension.get(dimensionKey);
+            if (rulesByChunk == null || rulesByChunk.isEmpty()) {
+                return 0;
+            }
+
+            int updated = 0;
+            for (ChunkPos pos : chunks) {
+                long key = packChunk(pos.x, pos.z);
+                StoredChunkRule existing = rulesByChunk.get(key);
+                if (existing == null) {
+                    continue;
+                }
+                rulesByChunk.put(key, existing.withAssignedTeam(teamName));
+                updated++;
+            }
+            if (updated > 0) {
+                setDirty();
+            }
+            return updated;
+        }
+
         @Override
         public CompoundTag save(CompoundTag tag) {
             ListTag dimensions = new ListTag();
@@ -399,6 +515,7 @@ public final class ChunkRuleRuntimeStore {
             String costResource,
             int costAmount,
             boolean allowBuild,
+            Map<String, RolePermissions> rolePermissions,
             int chunkColorRgb,
             int chunkX,
             int chunkZ,
@@ -421,6 +538,7 @@ public final class ChunkRuleRuntimeStore {
         private static final String KEY_COST_RESOURCE = "costResource";
         private static final String KEY_COST_AMOUNT = "costAmount";
         private static final String KEY_ALLOW_BUILD = "allowBuild";
+        private static final String KEY_ROLE_PERMISSIONS = "rolePermissions";
         private static final String KEY_COLOR = "color";
         private static final String KEY_CHUNK_X = "chunkX";
         private static final String KEY_CHUNK_Z = "chunkZ";
@@ -445,6 +563,16 @@ public final class ChunkRuleRuntimeStore {
             tag.putString(KEY_COST_RESOURCE, costResource);
             tag.putInt(KEY_COST_AMOUNT, costAmount);
             tag.putBoolean(KEY_ALLOW_BUILD, allowBuild);
+
+            ListTag rolePermissionList = new ListTag();
+            for (Map.Entry<String, RolePermissions> entry : rolePermissions.entrySet()) {
+                CompoundTag roleTag = new CompoundTag();
+                roleTag.putString("role", entry.getKey());
+                roleTag.put("permissions", entry.getValue().toTag());
+                rolePermissionList.add(roleTag);
+            }
+            tag.put(KEY_ROLE_PERMISSIONS, rolePermissionList);
+
             tag.putInt(KEY_COLOR, chunkColorRgb);
             tag.putInt(KEY_CHUNK_X, chunkX);
             tag.putInt(KEY_CHUNK_Z, chunkZ);
@@ -454,6 +582,23 @@ public final class ChunkRuleRuntimeStore {
         }
 
         static StoredChunkRule fromTag(CompoundTag tag) {
+            Map<String, RolePermissions> rolePermissions = new LinkedHashMap<>();
+            if (tag.contains(KEY_ROLE_PERMISSIONS, Tag.TAG_LIST)) {
+                ListTag rolePermissionList = tag.getList(KEY_ROLE_PERMISSIONS, Tag.TAG_COMPOUND);
+                for (int i = 0; i < rolePermissionList.size(); i++) {
+                    CompoundTag roleTag = rolePermissionList.getCompound(i);
+                    String roleName = normalizeRoleName(roleTag.getString("role"));
+                    if (roleName.isBlank()) {
+                        continue;
+                    }
+                    RolePermissions permissions = RolePermissions.fromTag(roleTag.getCompound("permissions"));
+                    rolePermissions.put(roleName, permissions);
+                }
+            }
+            if (!rolePermissions.containsKey("@everyone")) {
+                rolePermissions.put("@everyone", RolePermissions.fromLegacyAllowBuild(tag.getBoolean(KEY_ALLOW_BUILD)));
+            }
+
             return new StoredChunkRule(
                     tag.getUUID(KEY_OWNER),
                     tag.contains(KEY_OWNER_NAME) ? tag.getString(KEY_OWNER_NAME) : tag.getUUID(KEY_OWNER).toString(),
@@ -471,6 +616,7 @@ public final class ChunkRuleRuntimeStore {
                     tag.contains(KEY_COST_RESOURCE) ? tag.getString(KEY_COST_RESOURCE) : "minecraft:air",
                     tag.contains(KEY_COST_AMOUNT) ? tag.getInt(KEY_COST_AMOUNT) : 0,
                     tag.getBoolean(KEY_ALLOW_BUILD),
+                    rolePermissions,
                     tag.getInt(KEY_COLOR),
                     tag.getInt(KEY_CHUNK_X),
                     tag.getInt(KEY_CHUNK_Z),
@@ -478,11 +624,102 @@ public final class ChunkRuleRuntimeStore {
                     tag.getLong(KEY_CREATED)
             );
         }
+
+        StoredChunkRule withAssignedTeam(String teamName) {
+            return new StoredChunkRule(
+                    owner,
+                    ownerName,
+                    teamName == null ? "" : teamName,
+                    name,
+                    assignRoleToChunk,
+                    roleName,
+                    roleColorRgb,
+                    ! (teamName == null || teamName.isBlank()),
+                    buildHeightAboveFace,
+                    buildDepthBelowFace,
+                    initialChunkQuota,
+                    rewardResource,
+                    rewardAmount,
+                    costResource,
+                    costAmount,
+                    allowBuild,
+                    rolePermissions,
+                    chunkColorRgb,
+                    chunkX,
+                    chunkZ,
+                    faceY,
+                    createdAtMs
+            );
+        }
     }
 
-    public record ClaimInfo(boolean claimed, String chunkName, String teamName, String roleName, String ownerName) {
+    public record RolePermissions(
+            boolean canBuild,
+            boolean canBreak,
+            boolean canInteractBlocks,
+            boolean canInteractEntities,
+            boolean canOpenContainers
+    ) {
+        private static final String KEY_BUILD = "canBuild";
+        private static final String KEY_BREAK = "canBreak";
+        private static final String KEY_INTERACT_BLOCKS = "canInteractBlocks";
+        private static final String KEY_INTERACT_ENTITIES = "canInteractEntities";
+        private static final String KEY_OPEN_CONTAINERS = "canOpenContainers";
+
+        static RolePermissions fromLegacyAllowBuild(boolean allowBuild) {
+            return new RolePermissions(allowBuild, allowBuild, allowBuild, allowBuild, allowBuild);
+        }
+
+        static RolePermissions allAllowed() {
+            return new RolePermissions(true, true, true, true, true);
+        }
+
+        boolean isAllowed(Permission permission) {
+            return switch (permission) {
+                case BUILD -> canBuild;
+                case BREAK -> canBreak;
+                case INTERACT_BLOCK -> canInteractBlocks;
+                case INTERACT_ENTITY -> canInteractEntities;
+                case OPEN_CONTAINER -> canOpenContainers;
+            };
+        }
+
+        CompoundTag toTag() {
+            CompoundTag tag = new CompoundTag();
+            tag.putBoolean(KEY_BUILD, canBuild);
+            tag.putBoolean(KEY_BREAK, canBreak);
+            tag.putBoolean(KEY_INTERACT_BLOCKS, canInteractBlocks);
+            tag.putBoolean(KEY_INTERACT_ENTITIES, canInteractEntities);
+            tag.putBoolean(KEY_OPEN_CONTAINERS, canOpenContainers);
+            return tag;
+        }
+
+        static RolePermissions fromTag(CompoundTag tag) {
+            return new RolePermissions(
+                    tag.getBoolean(KEY_BUILD),
+                    tag.getBoolean(KEY_BREAK),
+                    tag.getBoolean(KEY_INTERACT_BLOCKS),
+                    tag.getBoolean(KEY_INTERACT_ENTITIES),
+                    tag.getBoolean(KEY_OPEN_CONTAINERS)
+            );
+        }
+    }
+
+    public record ClaimInfo(
+            boolean claimed,
+            String chunkName,
+            String teamName,
+            String roleName,
+            String ownerName,
+            boolean hasEveryoneRole,
+            boolean everyoneCanBuild,
+            boolean everyoneCanBreak,
+            boolean everyoneCanInteractBlocks,
+            boolean everyoneCanInteractEntities,
+            boolean everyoneCanOpenContainers
+    ) {
         public static ClaimInfo none() {
-            return new ClaimInfo(false, "", "", "", "");
+            return new ClaimInfo(false, "", "", "", "", false, false, false, false, false, false);
         }
     }
 }

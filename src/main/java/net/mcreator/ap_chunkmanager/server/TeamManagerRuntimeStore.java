@@ -30,9 +30,34 @@ public final class TeamManagerRuntimeStore {
             case REQUEST_STATE -> new ActionResult(true, "", data.toViews());
             case CREATE_TEAM -> createTeam(player, data, packet);
             case UPDATE_TEAM -> updateTeam(player, data, packet);
+            case ADD_ROLE -> addRole(player, data, packet);
             case ADD_MEMBER -> addMember(player, data, packet);
             case REMOVE_MEMBER -> removeMember(player, data, packet);
+            case ASSIGN_MEMBER_ROLE -> assignMemberRole(player, data, packet);
         };
+    }
+
+    private static ActionResult addRole(ServerPlayer player, TeamSavedData data, TeamManagerActionPacket packet) {
+        ManagedTeam team = data.teamsByName.get(normalizeKey(packet.teamName()));
+        if (team == null) {
+            return fail(data, "Team not found.");
+        }
+        if (!canManage(player, team)) {
+            return fail(data, "Only the team leader or server OP can add roles.");
+        }
+
+        String role = sanitizeRole(packet.rolesCsv());
+        if (role.isEmpty()) {
+            return fail(data, "Role name is required.");
+        }
+
+        List<String> roles = new ArrayList<>(team.roles());
+        if (roles.stream().noneMatch(existing -> existing.equalsIgnoreCase(role))) {
+            roles.add(role);
+        }
+        data.teamsByName.put(normalizeKey(team.name()), team.withMaxPlayersAndRoles(team.maxPlayers(), List.copyOf(roles)).sanitizeMemberRoles());
+        data.setDirty();
+        return ok(data, "Role added: " + role);
     }
 
     private static ActionResult createTeam(ServerPlayer player, TeamSavedData data, TeamManagerActionPacket packet) {
@@ -50,8 +75,10 @@ public final class TeamManagerRuntimeStore {
         List<String> roles = parseRoles(packet.rolesCsv());
         Set<String> members = new LinkedHashSet<>();
         members.add(player.getGameProfile().getName());
+        Map<String, String> memberRoles = new HashMap<>();
+        memberRoles.put(player.getGameProfile().getName(), "");
 
-        ManagedTeam team = new ManagedTeam(teamName, player.getUUID(), player.getGameProfile().getName(), maxPlayers, roles, members);
+        ManagedTeam team = new ManagedTeam(teamName, player.getUUID(), player.getGameProfile().getName(), maxPlayers, roles, members, memberRoles);
         data.teamsByName.put(key, team);
         data.setDirty();
 
@@ -73,7 +100,7 @@ public final class TeamManagerRuntimeStore {
         }
 
         List<String> roles = parseRoles(packet.rolesCsv());
-        ManagedTeam updated = team.withMaxPlayersAndRoles(maxPlayers, roles);
+        ManagedTeam updated = team.withMaxPlayersAndRoles(maxPlayers, roles).sanitizeMemberRoles();
         data.teamsByName.put(normalizeKey(team.name()), updated);
         data.setDirty();
         return ok(data, "Team updated: " + team.name());
@@ -101,7 +128,9 @@ public final class TeamManagerRuntimeStore {
 
         Set<String> members = new LinkedHashSet<>(team.members());
         members.add(member);
-        data.teamsByName.put(normalizeKey(team.name()), team.withMembers(members));
+    Map<String, String> memberRoles = new HashMap<>(team.memberRoles());
+    memberRoles.putIfAbsent(member, "");
+    data.teamsByName.put(normalizeKey(team.name()), team.withMembersAndRoles(members, memberRoles));
         data.setDirty();
         return ok(data, "Added " + member + " to " + team.name());
     }
@@ -128,9 +157,37 @@ public final class TeamManagerRuntimeStore {
 
         Set<String> members = new LinkedHashSet<>(team.members());
         members.remove(member);
-        data.teamsByName.put(normalizeKey(team.name()), team.withMembers(members));
+        Map<String, String> memberRoles = new HashMap<>(team.memberRoles());
+        memberRoles.remove(member);
+        data.teamsByName.put(normalizeKey(team.name()), team.withMembersAndRoles(members, memberRoles));
         data.setDirty();
         return ok(data, "Removed " + member + " from " + team.name());
+    }
+
+    private static ActionResult assignMemberRole(ServerPlayer player, TeamSavedData data, TeamManagerActionPacket packet) {
+        ManagedTeam team = data.teamsByName.get(normalizeKey(packet.teamName()));
+        if (team == null) {
+            return fail(data, "Team not found.");
+        }
+        if (!canManage(player, team)) {
+            return fail(data, "Only the team leader or server OP can assign roles.");
+        }
+
+        String member = sanitizeMemberName(packet.memberName());
+        if (member.isEmpty() || !team.members().contains(member)) {
+            return fail(data, "Member is not in this team.");
+        }
+
+        String role = sanitizeRole(packet.rolesCsv());
+        if (!role.isEmpty() && team.roles().stream().noneMatch(existing -> existing.equalsIgnoreCase(role))) {
+            return fail(data, "Unknown role for this team.");
+        }
+
+        Map<String, String> memberRoles = new HashMap<>(team.memberRoles());
+        memberRoles.put(member, role);
+        data.teamsByName.put(normalizeKey(team.name()), team.withMembersAndRoles(team.members(), memberRoles));
+        data.setDirty();
+        return ok(data, role.isEmpty() ? ("Removed role for " + member + ".") : ("Assigned role '" + role + "' to " + member + "."));
     }
 
     private static ActionResult ok(TeamSavedData data, String message) {
@@ -195,23 +252,67 @@ public final class TeamManagerRuntimeStore {
         return List.copyOf(roles);
     }
 
+    private static String sanitizeRole(String role) {
+        if (role == null) {
+            return "";
+        }
+        String trimmed = role.trim();
+        if (trimmed.isEmpty()) {
+            return "";
+        }
+        return trimmed.substring(0, Math.min(32, trimmed.length()));
+    }
+
     private static TeamSavedData getData(Level level) {
         return level.getServer().overworld().getDataStorage().computeIfAbsent(TeamSavedData::load, TeamSavedData::new, DATA_KEY);
     }
 
-    public record TeamView(String name, String leaderName, int maxPlayers, List<String> roles, List<String> members) {
+    public static boolean teamExists(Level level, String teamName) {
+        if (level == null || teamName == null || teamName.isBlank()) {
+            return false;
+        }
+        TeamSavedData data = getData(level);
+        return data.teamsByName.containsKey(normalizeKey(teamName));
+    }
+
+    public static List<String> getAllTeamNames(Level level) {
+        if (level == null) {
+            return List.of();
+        }
+        TeamSavedData data = getData(level);
+        return data.teamsByName.values().stream()
+                .map(ManagedTeam::name)
+                .sorted(String.CASE_INSENSITIVE_ORDER)
+                .toList();
+    }
+
+    public static String getAssignedRoleForPlayer(Level level, String teamName, String playerName) {
+        if (level == null || teamName == null || teamName.isBlank() || playerName == null || playerName.isBlank()) {
+            return "";
+        }
+        TeamSavedData data = getData(level);
+        ManagedTeam team = data.teamsByName.get(normalizeKey(teamName));
+        if (team == null) {
+            return "";
+        }
+        return sanitizeRole(team.memberRoles().getOrDefault(playerName, ""));
+    }
+
+    public record TeamView(String name, String leaderName, int maxPlayers, List<String> roles, List<String> members, Map<String, String> memberRoles) {
     }
 
     public record ActionResult(boolean success, String message, List<TeamView> teams) {
     }
 
-    private record ManagedTeam(String name, UUID leaderUuid, String leaderName, int maxPlayers, List<String> roles, Set<String> members) {
+        private record ManagedTeam(String name, UUID leaderUuid, String leaderName, int maxPlayers, List<String> roles, Set<String> members,
+            Map<String, String> memberRoles) {
         private static final String KEY_NAME = "name";
         private static final String KEY_LEADER_UUID = "leaderUuid";
         private static final String KEY_LEADER_NAME = "leaderName";
         private static final String KEY_MAX_PLAYERS = "maxPlayers";
         private static final String KEY_ROLES = "roles";
         private static final String KEY_MEMBERS = "members";
+        private static final String KEY_MEMBER_ROLES = "memberRoles";
 
         ManagedTeam {
             name = name == null ? "" : name;
@@ -219,14 +320,28 @@ public final class TeamManagerRuntimeStore {
             maxPlayers = clampMaxPlayers(maxPlayers);
             roles = List.copyOf(roles == null ? List.of() : roles);
             members = Set.copyOf(members == null ? Set.of() : members);
+            memberRoles = Map.copyOf(memberRoles == null ? Map.of() : memberRoles);
         }
 
         ManagedTeam withMaxPlayersAndRoles(int newMaxPlayers, List<String> newRoles) {
-            return new ManagedTeam(name, leaderUuid, leaderName, newMaxPlayers, newRoles, members);
+            return new ManagedTeam(name, leaderUuid, leaderName, newMaxPlayers, newRoles, members, memberRoles);
         }
 
-        ManagedTeam withMembers(Set<String> newMembers) {
-            return new ManagedTeam(name, leaderUuid, leaderName, maxPlayers, roles, newMembers);
+        ManagedTeam withMembersAndRoles(Set<String> newMembers, Map<String, String> newMemberRoles) {
+            return new ManagedTeam(name, leaderUuid, leaderName, maxPlayers, roles, newMembers, newMemberRoles);
+        }
+
+        ManagedTeam sanitizeMemberRoles() {
+            Map<String, String> cleaned = new HashMap<>();
+            for (String member : members) {
+                String assigned = sanitizeRole(memberRoles.getOrDefault(member, ""));
+                String assignedFinal = assigned;
+                if (!assignedFinal.isEmpty() && roles.stream().noneMatch(existing -> existing.equalsIgnoreCase(assignedFinal))) {
+                    assigned = "";
+                }
+                cleaned.put(member, assigned);
+            }
+            return new ManagedTeam(name, leaderUuid, leaderName, maxPlayers, roles, members, cleaned);
         }
 
         CompoundTag toTag() {
@@ -251,6 +366,15 @@ public final class TeamManagerRuntimeStore {
                 memberList.add(memberTag);
             }
             tag.put(KEY_MEMBERS, memberList);
+
+            ListTag memberRoleList = new ListTag();
+            for (Map.Entry<String, String> entry : memberRoles.entrySet()) {
+                CompoundTag memberRoleTag = new CompoundTag();
+                memberRoleTag.putString("member", entry.getKey());
+                memberRoleTag.putString("role", entry.getValue() == null ? "" : entry.getValue());
+                memberRoleList.add(memberRoleTag);
+            }
+            tag.put(KEY_MEMBER_ROLES, memberRoleList);
             return tag;
         }
 
@@ -273,14 +397,26 @@ public final class TeamManagerRuntimeStore {
                 }
             }
 
+            Map<String, String> memberRoles = new HashMap<>();
+            ListTag memberRoleTags = tag.getList(KEY_MEMBER_ROLES, Tag.TAG_COMPOUND);
+            for (int i = 0; i < memberRoleTags.size(); i++) {
+                CompoundTag memberRoleTag = memberRoleTags.getCompound(i);
+                String member = sanitizeMemberName(memberRoleTag.getString("member"));
+                if (member.isEmpty()) {
+                    continue;
+                }
+                memberRoles.put(member, sanitizeRole(memberRoleTag.getString("role")));
+            }
+
             return new ManagedTeam(
                     tag.getString(KEY_NAME),
                     tag.getUUID(KEY_LEADER_UUID),
                     tag.getString(KEY_LEADER_NAME),
                     tag.getInt(KEY_MAX_PLAYERS),
                     roles,
-                    members
-            );
+                    members,
+                    memberRoles
+            ).sanitizeMemberRoles();
         }
     }
 
@@ -309,7 +445,8 @@ public final class TeamManagerRuntimeStore {
                             team.leaderName(),
                             team.maxPlayers(),
                             List.copyOf(team.roles()),
-                            team.members().stream().sorted(String.CASE_INSENSITIVE_ORDER).toList()
+                            team.members().stream().sorted(String.CASE_INSENSITIVE_ORDER).toList(),
+                            team.memberRoles()
                     ))
                     .toList();
         }

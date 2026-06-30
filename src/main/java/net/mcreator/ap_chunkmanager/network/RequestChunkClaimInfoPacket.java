@@ -43,7 +43,13 @@ public record RequestChunkClaimInfoPacket(int chunkX, int chunkZ) {
                             info.chunkName(),
                             info.teamName(),
                             info.roleName(),
-                            info.ownerName()
+                            info.ownerName(),
+                            info.hasEveryoneRole(),
+                            info.everyoneCanBuild(),
+                            info.everyoneCanBreak(),
+                            info.everyoneCanInteractBlocks(),
+                            info.everyoneCanInteractEntities(),
+                            info.everyoneCanOpenContainers()
                     )
             );
         });

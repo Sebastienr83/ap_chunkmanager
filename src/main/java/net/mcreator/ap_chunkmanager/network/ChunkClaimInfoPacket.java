@@ -15,7 +15,13 @@ public record ChunkClaimInfoPacket(
         String chunkName,
         String teamName,
         String roleName,
-        String ownerName
+        String ownerName,
+        boolean hasEveryoneRole,
+        boolean everyoneCanBuild,
+        boolean everyoneCanBreak,
+        boolean everyoneCanInteractBlocks,
+        boolean everyoneCanInteractEntities,
+        boolean everyoneCanOpenContainers
 ) {
     public static void encode(ChunkClaimInfoPacket message, FriendlyByteBuf buffer) {
         buffer.writeInt(message.chunkX);
@@ -25,6 +31,12 @@ public record ChunkClaimInfoPacket(
         buffer.writeUtf(message.teamName, 128);
         buffer.writeUtf(message.roleName, 128);
         buffer.writeUtf(message.ownerName, 128);
+        buffer.writeBoolean(message.hasEveryoneRole);
+        buffer.writeBoolean(message.everyoneCanBuild);
+        buffer.writeBoolean(message.everyoneCanBreak);
+        buffer.writeBoolean(message.everyoneCanInteractBlocks);
+        buffer.writeBoolean(message.everyoneCanInteractEntities);
+        buffer.writeBoolean(message.everyoneCanOpenContainers);
     }
 
     public static ChunkClaimInfoPacket decode(FriendlyByteBuf buffer) {
@@ -35,7 +47,13 @@ public record ChunkClaimInfoPacket(
                 buffer.readUtf(128),
                 buffer.readUtf(128),
                 buffer.readUtf(128),
-                buffer.readUtf(128)
+                buffer.readUtf(128),
+                buffer.readBoolean(),
+                buffer.readBoolean(),
+                buffer.readBoolean(),
+                buffer.readBoolean(),
+                buffer.readBoolean(),
+                buffer.readBoolean()
         );
     }
 
@@ -55,7 +73,13 @@ public record ChunkClaimInfoPacket(
                     message.chunkName,
                     message.teamName,
                     message.roleName,
-                    message.ownerName
+                    message.ownerName,
+                    message.hasEveryoneRole,
+                    message.everyoneCanBuild,
+                    message.everyoneCanBreak,
+                    message.everyoneCanInteractBlocks,
+                    message.everyoneCanInteractEntities,
+                    message.everyoneCanOpenContainers
             );
         });
         context.setPacketHandled(true);

@@ -11,7 +11,9 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 public class TeamManagerScreen extends Screen {
     private static final int ROW_HEIGHT = 18;
@@ -21,8 +23,8 @@ public class TeamManagerScreen extends Screen {
 
     private EditBox teamNameEdit;
     private EditBox maxPlayersEdit;
-    private EditBox rolesEdit;
     private EditBox memberEdit;
+    private Button rolePickerButton;
 
     private int panelX;
     private int panelY;
@@ -38,6 +40,11 @@ public class TeamManagerScreen extends Screen {
     private int listScrollOffset;
     private long lastSeenVersion;
     private List<TeamManagerSyncPacket.TeamSnapshot> teams = List.of();
+    private List<ListRow> visibleRows = List.of();
+    private final Set<String> expandedTeamKeys = new LinkedHashSet<>();
+
+    private String selectedRoleName = "";
+    private int selectedRoleColor = 0xFFFFFF;
 
     private boolean rolePopupOpen;
     private EditBox roleSearchEdit;
@@ -74,9 +81,12 @@ public class TeamManagerScreen extends Screen {
         maxPlayersEdit.setValue("8");
 
         y += 34;
-        rolesEdit = addRenderableWidget(new EditBox(this.font, fieldX, y, fieldW - 74, 20, Component.literal("Roles (comma separated)")));
-        rolesEdit.setHint(Component.literal("Roles (comma separated or role#RRGGBB)"));
-        addRenderableWidget(Button.builder(Component.literal("Roles"), b -> openRolePopup()).bounds(fieldX + fieldW - 70, y, 70, 20).build());
+        rolePickerButton = addRenderableWidget(
+                Button.builder(Component.empty(), b -> openRolePopup())
+                        .bounds(fieldX, y, fieldW, 20)
+                        .build()
+        );
+        updateRolePickerButtonLabel();
 
         y += 38;
         addRenderableWidget(Button.builder(Component.literal("Create Team"), b -> createTeam()).bounds(fieldX, y, fieldW, 20).build());
@@ -94,7 +104,7 @@ public class TeamManagerScreen extends Screen {
         addRenderableWidget(Button.builder(Component.literal("Remove Player"), b -> removeMember()).bounds(fieldX + half + 6, y, half, 20).build());
 
         addRenderableWidget(Button.builder(Component.literal("Refresh"), b -> requestState()).bounds(panelX + panelW - 86, panelY + 10, 76, 20).build());
-        addRenderableWidget(Button.builder(Component.literal("Close"), b -> onClose()).bounds(panelX + panelW - 86, panelY + panelH - 30, 76, 20).build());
+        addRenderableWidget(Button.builder(Component.literal("Close"), b -> onClose()).bounds(panelX + 14, panelY + panelH - 30, 90, 20).build());
 
         roleSearchEdit = addRenderableWidget(new EditBox(this.font, 0, 0, 100, 20, Component.literal("Search role")));
         roleSearchEdit.setVisible(false);
@@ -123,8 +133,8 @@ public class TeamManagerScreen extends Screen {
         listW = panelW / 2 - 24;
         listH = panelH - 108;
 
-        rolePopupW = Math.min(460, this.width - 80);
-        rolePopupH = Math.min(320, this.height - 80);
+        rolePopupW = Math.min(520, this.width - 80);
+        rolePopupH = Math.min(340, this.height - 80);
         rolePopupX = (this.width - rolePopupW) / 2;
         rolePopupY = (this.height - rolePopupH) / 2;
     }
@@ -133,12 +143,93 @@ public class TeamManagerScreen extends Screen {
         APChunkManagerMod.NETWORK.sendToServer(new TeamManagerActionPacket(TeamManagerActionPacket.Action.REQUEST_STATE, "", 8, "", ""));
     }
 
+    private static String teamKey(String name) {
+        return name == null ? "" : name.trim().toLowerCase();
+    }
+
+    private static String normalizeRole(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private static String roleNameFromToken(String token) {
+        int idx = token.indexOf('#');
+        return idx >= 0 ? token.substring(0, idx).trim() : token.trim();
+    }
+
+    private static int roleColorFromToken(String token) {
+        int idx = token.indexOf('#');
+        if (idx < 0 || idx + 1 >= token.length()) {
+            return 0xFFFFFF;
+        }
+        try {
+            return Integer.parseInt(token.substring(idx + 1), 16) & 0xFFFFFF;
+        } catch (Exception ignored) {
+            return 0xFFFFFF;
+        }
+    }
+
+    private static String composeRoleToken(String name, int color) {
+        if (name == null || name.isBlank()) {
+            return "";
+        }
+        return name.trim() + "#" + String.format("%06X", color & 0xFFFFFF);
+    }
+
+    private void selectRoleToken(String token) {
+        selectedRoleName = roleNameFromToken(token);
+        selectedRoleColor = roleColorFromToken(token);
+        updateRolePickerButtonLabel();
+    }
+
+    private void updateRolePickerButtonLabel() {
+        if (rolePickerButton == null) {
+            return;
+        }
+        if (selectedRoleName.isBlank()) {
+            rolePickerButton.setMessage(Component.literal("Role: None (Select/Create)"));
+        } else {
+            rolePickerButton.setMessage(Component.literal("Role: " + selectedRoleName + "  #" + String.format("%06X", selectedRoleColor)));
+        }
+    }
+
+    private void rebuildVisibleRows() {
+        List<ListRow> rows = new ArrayList<>();
+        for (int i = 0; i < teams.size(); i++) {
+            TeamManagerSyncPacket.TeamSnapshot team = teams.get(i);
+            String key = teamKey(team.name());
+            rows.add(ListRow.team(i, team));
+            if (!expandedTeamKeys.contains(key)) {
+                continue;
+            }
+            for (String member : team.members()) {
+                String role = normalizeRole(team.memberRoles().getOrDefault(member, ""));
+                rows.add(ListRow.member(i, team.name(), member, role));
+            }
+        }
+        visibleRows = rows;
+        int rowsPerPage = Math.max(1, listH / ROW_HEIGHT);
+        int maxScroll = Math.max(0, visibleRows.size() - rowsPerPage);
+        listScrollOffset = Mth.clamp(listScrollOffset, 0, maxScroll);
+    }
+
+    private String buildRolesCsvForTeam(TeamManagerSyncPacket.TeamSnapshot team) {
+        List<String> roles = new ArrayList<>(team.roles());
+        if (!selectedRoleName.isBlank()) {
+            String token = composeRoleToken(selectedRoleName, selectedRoleColor);
+            if (roles.stream().noneMatch(existing -> existing.equalsIgnoreCase(token))) {
+                roles.add(token);
+            }
+        }
+        return String.join(",", roles);
+    }
+
     private void createTeam() {
+        String rolesCsv = selectedRoleName.isBlank() ? "" : composeRoleToken(selectedRoleName, selectedRoleColor);
         APChunkManagerMod.NETWORK.sendToServer(new TeamManagerActionPacket(
                 TeamManagerActionPacket.Action.CREATE_TEAM,
                 teamNameEdit.getValue(),
                 parseMaxPlayers(),
-                rolesEdit.getValue(),
+                rolesCsv,
                 ""
         ));
     }
@@ -153,7 +244,7 @@ public class TeamManagerScreen extends Screen {
                 TeamManagerActionPacket.Action.UPDATE_TEAM,
                 selected.name(),
                 parseMaxPlayers(),
-                rolesEdit.getValue(),
+                buildRolesCsvForTeam(selected),
                 ""
         ));
     }
@@ -189,6 +280,17 @@ public class TeamManagerScreen extends Screen {
     }
 
     private void openRolePopup() {
+        TeamManagerSyncPacket.TeamSnapshot selected = getSelectedTeam();
+        if (selected == null && !teams.isEmpty()) {
+            selectedIndex = 0;
+            selected = teams.get(0);
+            teamNameEdit.setValue(selected.name());
+            maxPlayersEdit.setValue(Integer.toString(selected.maxPlayers()));
+        }
+        if (selected == null) {
+            return;
+        }
+
         rolePopupOpen = true;
         rolePopupScrollOffset = 0;
         roleSearchEdit.setVisible(true);
@@ -222,15 +324,20 @@ public class TeamManagerScreen extends Screen {
     }
 
     private void refreshRoleFilter() {
+        TeamManagerSyncPacket.TeamSnapshot selected = getSelectedTeam();
+        if (selected == null) {
+            filteredRoles = List.of();
+            return;
+        }
+
         String needle = roleSearchEdit.getValue().trim().toLowerCase();
-        List<String> catalog = TeamManagerClientState.getRoleCatalog();
         if (needle.isBlank()) {
-            filteredRoles = catalog;
+            filteredRoles = selected.roles();
             return;
         }
 
         List<String> out = new ArrayList<>();
-        for (String value : catalog) {
+        for (String value : selected.roles()) {
             if (value.toLowerCase().contains(needle)) {
                 out.add(value);
             }
@@ -238,39 +345,37 @@ public class TeamManagerScreen extends Screen {
         filteredRoles = out;
     }
 
-    private void appendRoleFromPopup(String role) {
-        String clean = role == null ? "" : role.trim();
-        if (clean.isEmpty()) {
+    private void createRoleFromPopup() {
+        TeamManagerSyncPacket.TeamSnapshot selected = getSelectedTeam();
+        if (selected == null) {
             return;
         }
 
-        String existing = rolesEdit.getValue().trim();
-        if (existing.isEmpty()) {
-            rolesEdit.setValue(clean);
-        } else {
-            List<String> roles = new ArrayList<>();
-            for (String token : existing.split(",")) {
-                String t = token.trim();
-                if (!t.isEmpty()) {
-                    roles.add(t);
-                }
-            }
-            if (roles.stream().noneMatch(r -> r.equalsIgnoreCase(clean))) {
-                roles.add(clean);
-            }
-            rolesEdit.setValue(String.join(",", roles));
-        }
-    }
-
-    private void createRoleFromPopup() {
         String name = roleNewNameEdit.getValue().trim();
         if (name.isEmpty()) {
             return;
         }
 
-        String hex = roleNewColorEdit.getValue().trim().toUpperCase();
-        String token = hex.isEmpty() ? name : (name + "#" + hex);
-        appendRoleFromPopup(token);
+        int color = 0xFFFFFF;
+        try {
+            String raw = roleNewColorEdit.getValue().trim();
+            if (!raw.isBlank()) {
+                color = Integer.parseInt(raw, 16) & 0xFFFFFF;
+            }
+        } catch (Exception ignored) {
+            color = 0xFFFFFF;
+        }
+
+        String token = composeRoleToken(name, color);
+        APChunkManagerMod.NETWORK.sendToServer(new TeamManagerActionPacket(
+                TeamManagerActionPacket.Action.ADD_ROLE,
+                selected.name(),
+                selected.maxPlayers(),
+                token,
+                ""
+        ));
+        selectRoleToken(token);
+        requestState();
         roleNewNameEdit.setValue("");
     }
 
@@ -287,6 +392,40 @@ public class TeamManagerScreen extends Screen {
             return null;
         }
         return teams.get(selectedIndex);
+    }
+
+    private void toggleTeamExpanded(TeamManagerSyncPacket.TeamSnapshot team) {
+        String key = teamKey(team.name());
+        if (expandedTeamKeys.contains(key)) {
+            expandedTeamKeys.remove(key);
+        } else {
+            expandedTeamKeys.add(key);
+        }
+        rebuildVisibleRows();
+    }
+
+    private void cycleMemberRole(TeamManagerSyncPacket.TeamSnapshot team, String memberName) {
+        List<String> roles = new ArrayList<>();
+        roles.add("");
+        roles.addAll(team.roles());
+
+        String current = normalizeRole(team.memberRoles().getOrDefault(memberName, ""));
+        int idx = 0;
+        for (int i = 0; i < roles.size(); i++) {
+            if (roles.get(i).equalsIgnoreCase(current)) {
+                idx = i;
+                break;
+            }
+        }
+
+        String nextRole = roles.get((idx + 1) % roles.size());
+        APChunkManagerMod.NETWORK.sendToServer(new TeamManagerActionPacket(
+                TeamManagerActionPacket.Action.ASSIGN_MEMBER_ROLE,
+                team.name(),
+                team.maxPlayers(),
+                nextRole,
+                memberName
+        ));
     }
 
     @Override
@@ -306,8 +445,8 @@ public class TeamManagerScreen extends Screen {
         }
 
         if (mouseX >= listX && mouseX <= listX + listW && mouseY >= listY && mouseY <= listY + listH) {
-            int visibleRows = Math.max(1, listH / ROW_HEIGHT);
-            int maxScroll = Math.max(0, teams.size() - visibleRows);
+            int visibleRowsCount = Math.max(1, listH / ROW_HEIGHT);
+            int maxScroll = Math.max(0, this.visibleRows.size() - visibleRowsCount);
             listScrollOffset = Mth.clamp(listScrollOffset - (int) Math.signum(delta), 0, maxScroll);
             return true;
         }
@@ -328,7 +467,8 @@ public class TeamManagerScreen extends Screen {
                     int row = (int) ((mouseY - listPY) / ROLE_ROW_HEIGHT);
                     int index = rolePopupScrollOffset + row;
                     if (index >= 0 && index < filteredRoles.size()) {
-                        appendRoleFromPopup(filteredRoles.get(index));
+                        selectRoleToken(filteredRoles.get(index));
+                        closeRolePopup();
                     }
                     return true;
                 }
@@ -359,12 +499,18 @@ public class TeamManagerScreen extends Screen {
         if (button == 0 && mouseX >= listX && mouseX <= listX + listW && mouseY >= listY && mouseY <= listY + listH) {
             int row = (int) ((mouseY - listY) / ROW_HEIGHT);
             int index = listScrollOffset + row;
-            if (index >= 0 && index < teams.size()) {
-                selectedIndex = index;
-                TeamManagerSyncPacket.TeamSnapshot selected = teams.get(index);
+            if (index >= 0 && index < visibleRows.size()) {
+                ListRow clickedRow = visibleRows.get(index);
+                selectedIndex = clickedRow.teamIndex();
+                TeamManagerSyncPacket.TeamSnapshot selected = teams.get(clickedRow.teamIndex());
                 teamNameEdit.setValue(selected.name());
                 maxPlayersEdit.setValue(Integer.toString(selected.maxPlayers()));
-                rolesEdit.setValue(String.join(",", selected.roles()));
+
+                if (clickedRow.isTeamRow()) {
+                    toggleTeamExpanded(selected);
+                } else {
+                    cycleMemberRole(selected, clickedRow.memberName());
+                }
             }
             return true;
         }
@@ -388,6 +534,7 @@ public class TeamManagerScreen extends Screen {
             if (selectedIndex >= teams.size()) {
                 selectedIndex = teams.isEmpty() ? -1 : 0;
             }
+            rebuildVisibleRows();
             if (rolePopupOpen) {
                 refreshRoleFilter();
             }
@@ -411,25 +558,33 @@ public class TeamManagerScreen extends Screen {
         int rows = Math.max(1, listH / ROW_HEIGHT);
         for (int i = 0; i < rows; i++) {
             int index = listScrollOffset + i;
-            if (index >= teams.size()) {
+            if (index >= visibleRows.size()) {
                 break;
             }
 
-            TeamManagerSyncPacket.TeamSnapshot team = teams.get(index);
+            ListRow row = visibleRows.get(index);
+            TeamManagerSyncPacket.TeamSnapshot team = teams.get(row.teamIndex());
             int rowY = listY + (i * ROW_HEIGHT);
-            int bg = index == selectedIndex ? 0xFF24405A : ((i & 1) == 0 ? 0xFF0E1822 : 0xFF0C151E);
+            int bg = row.teamIndex() == selectedIndex ? 0xFF24405A : ((i & 1) == 0 ? 0xFF0E1822 : 0xFF0C151E);
             guiGraphics.fill(listX + 1, rowY, listX + listW - 1, rowY + ROW_HEIGHT - 1, bg);
 
-            String line = team.name() + "  [" + team.members().size() + "/" + team.maxPlayers() + "]";
-            guiGraphics.drawString(this.font, Component.literal(line), listX + 6, rowY + 5, 0xFFD9E9F8, false);
+            if (row.isTeamRow()) {
+                boolean expanded = expandedTeamKeys.contains(teamKey(team.name()));
+                String line = (expanded ? "[-] " : "[+] ") + team.name() + "  [" + team.members().size() + "/" + team.maxPlayers() + "]";
+                guiGraphics.drawString(this.font, Component.literal(line), listX + 6, rowY + 5, 0xFFD9E9F8, false);
+            } else {
+                String role = row.memberRole().isBlank() ? "None" : row.memberRole();
+                String memberLine = "  - " + row.memberName() + "  (role: " + role + ")";
+                guiGraphics.drawString(this.font, Component.literal(memberLine), listX + 12, rowY + 5, 0xFFBFD3E8, false);
+            }
         }
 
         int trackX0 = listX + listW - 4;
         int trackX1 = listX + listW - 1;
         guiGraphics.fill(trackX0, listY, trackX1, listY + listH, 0x88324A60);
-        int visibleRows = Math.max(1, listH / ROW_HEIGHT);
-        int maxScroll = Math.max(1, teams.size() - visibleRows);
-        int thumbH = Math.max(16, (int) ((visibleRows / (double) Math.max(visibleRows, teams.size())) * listH));
+        int visibleRowsCount = Math.max(1, listH / ROW_HEIGHT);
+        int maxScroll = Math.max(1, this.visibleRows.size() - visibleRowsCount);
+        int thumbH = Math.max(16, (int) ((visibleRowsCount / (double) Math.max(visibleRowsCount, this.visibleRows.size())) * listH));
         int thumbTravel = Math.max(1, listH - thumbH);
         int thumbY = listY + (int) ((listScrollOffset / (double) maxScroll) * thumbTravel);
         guiGraphics.fill(trackX0, thumbY, trackX1, thumbY + thumbH, 0xFF9EC5EA);
@@ -441,11 +596,12 @@ public class TeamManagerScreen extends Screen {
         if (selected != null) {
             guiGraphics.drawString(this.font, Component.literal("Leader: " + selected.leaderName()), rightX, infoY + 16, 0xFFD7E3F4, false);
             guiGraphics.drawString(this.font, Component.literal("Roles: " + String.join(", ", selected.roles())), rightX, infoY + 32, 0xFFD7E3F4, false);
+            guiGraphics.drawString(this.font, Component.literal("Assign role: click member row"), rightX, infoY + 46, 0xFF9FC2E5, false);
             String membersPreview = String.join(", ", selected.members());
             if (membersPreview.length() > 88) {
                 membersPreview = membersPreview.substring(0, 88) + "...";
             }
-            guiGraphics.drawString(this.font, Component.literal("Members: " + membersPreview), rightX, infoY + 48, 0xFFD7E3F4, false);
+            guiGraphics.drawString(this.font, Component.literal("Members: " + membersPreview), rightX, infoY + 62, 0xFFD7E3F4, false);
         }
 
         super.render(guiGraphics, mouseX, mouseY, partialTick);
@@ -505,12 +661,22 @@ public class TeamManagerScreen extends Screen {
         guiGraphics.fill(createX, createY, createX + 56, createY + 20, 0xFF3B556E);
         guiGraphics.drawString(this.font, Component.literal("Add"), createX + 18, createY + 6, 0xFFEAF2FF, false);
 
-        guiGraphics.drawString(this.font, Component.literal("Pick role or create new role + color"), rolePopupX + 12, rolePopupY + rolePopupH - 84, 0xFF9FC2E5,
+        guiGraphics.drawString(this.font, Component.literal("Select role or create + persist role"), rolePopupX + 12, rolePopupY + rolePopupH - 84, 0xFF9FC2E5,
                 false);
     }
 
     @Override
     public void onClose() {
         this.minecraft.setScreen(parent);
+    }
+
+    private record ListRow(int teamIndex, boolean isTeamRow, String teamName, String memberName, String memberRole) {
+        static ListRow team(int teamIndex, TeamManagerSyncPacket.TeamSnapshot team) {
+            return new ListRow(teamIndex, true, team.name(), "", "");
+        }
+
+        static ListRow member(int teamIndex, String teamName, String memberName, String memberRole) {
+            return new ListRow(teamIndex, false, teamName, memberName, memberRole == null ? "" : memberRole);
+        }
     }
 }

@@ -452,8 +452,9 @@ public final class ChunkManagerRuntimeEvents {
         return CLAIM_INFO_CACHE.get(key);
     }
 
-    public static void applyServerChunkClaimInfo(int chunkX, int chunkZ, boolean claimed, String chunkName, String teamName, String roleName,
-            String ownerName) {
+        public static void applyServerChunkClaimInfo(int chunkX, int chunkZ, boolean claimed, String chunkName, String teamName, String roleName,
+            String ownerName, boolean hasEveryoneRole, boolean everyoneCanBuild, boolean everyoneCanBreak, boolean everyoneCanInteractBlocks,
+            boolean everyoneCanInteractEntities, boolean everyoneCanOpenContainers) {
         long key = packChunk(chunkX, chunkZ);
         LAST_CLAIM_REQUEST_MS.remove(key);
 
@@ -463,8 +464,28 @@ public final class ChunkManagerRuntimeEvents {
             return;
         }
 
-        CLAIM_INFO_CACHE.put(key, new ChunkClaimInfo(chunkX, chunkZ, safe(chunkName), safe(teamName), safe(roleName), safe(ownerName)));
+        CLAIM_INFO_CACHE.put(key, new ChunkClaimInfo(
+                chunkX,
+                chunkZ,
+                safe(chunkName),
+                safe(teamName),
+                safe(roleName),
+                safe(ownerName),
+                hasEveryoneRole,
+                everyoneCanBuild,
+                everyoneCanBreak,
+                everyoneCanInteractBlocks,
+                everyoneCanInteractEntities,
+                everyoneCanOpenContainers
+        ));
         CLAIM_INFO_CACHE_AT_MS.put(key, System.currentTimeMillis());
+    }
+
+    public static void invalidateClaimInfo(int chunkX, int chunkZ) {
+        long key = packChunk(chunkX, chunkZ);
+        CLAIM_INFO_CACHE.remove(key);
+        CLAIM_INFO_CACHE_AT_MS.remove(key);
+        LAST_CLAIM_REQUEST_MS.remove(key);
     }
 
     private static String safe(String value) {
@@ -475,7 +496,20 @@ public final class ChunkManagerRuntimeEvents {
         return (((long) chunkX) << 32) ^ (chunkZ & 0xFFFFFFFFL);
     }
 
-    public record ChunkClaimInfo(int chunkX, int chunkZ, String chunkName, String teamName, String roleName, String ownerName) {
+        public record ChunkClaimInfo(
+            int chunkX,
+            int chunkZ,
+            String chunkName,
+            String teamName,
+            String roleName,
+            String ownerName,
+            boolean hasEveryoneRole,
+            boolean everyoneCanBuild,
+            boolean everyoneCanBreak,
+            boolean everyoneCanInteractBlocks,
+            boolean everyoneCanInteractEntities,
+            boolean everyoneCanOpenContainers
+        ) {
     }
 
     private static int calculateBaseMapHash(double playerX, double playerZ, byte scale) {

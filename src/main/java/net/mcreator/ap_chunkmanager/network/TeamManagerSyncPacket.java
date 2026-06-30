@@ -7,7 +7,9 @@ import net.minecraftforge.network.NetworkDirection;
 import net.minecraftforge.network.NetworkEvent;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 
 public record TeamManagerSyncPacket(
@@ -22,7 +24,7 @@ public record TeamManagerSyncPacket(
 
     public static TeamManagerSyncPacket fromResult(TeamManagerRuntimeStore.ActionResult result) {
         List<TeamSnapshot> snapshots = result.teams().stream()
-                .map(team -> new TeamSnapshot(team.name(), team.leaderName(), team.maxPlayers(), team.roles(), team.members()))
+                .map(team -> new TeamSnapshot(team.name(), team.leaderName(), team.maxPlayers(), team.roles(), team.members(), team.memberRoles()))
                 .toList();
         return new TeamManagerSyncPacket(result.success(), result.message(), snapshots);
     }
@@ -44,6 +46,12 @@ public record TeamManagerSyncPacket(
             buffer.writeVarInt(team.members.size());
             for (String member : team.members) {
                 buffer.writeUtf(member, 64);
+            }
+
+            buffer.writeVarInt(team.memberRoles.size());
+            for (Map.Entry<String, String> entry : team.memberRoles.entrySet()) {
+                buffer.writeUtf(entry.getKey(), 64);
+                buffer.writeUtf(entry.getValue(), 64);
             }
         }
     }
@@ -71,7 +79,13 @@ public record TeamManagerSyncPacket(
                 members.add(buffer.readUtf(64));
             }
 
-            teams.add(new TeamSnapshot(name, leaderName, maxPlayers, roles, members));
+            int memberRoleCount = Math.max(0, Math.min(2048, buffer.readVarInt()));
+            Map<String, String> memberRoles = new LinkedHashMap<>();
+            for (int mr = 0; mr < memberRoleCount; mr++) {
+                memberRoles.put(buffer.readUtf(64), buffer.readUtf(64));
+            }
+
+            teams.add(new TeamSnapshot(name, leaderName, maxPlayers, roles, members, memberRoles));
         }
 
         return new TeamManagerSyncPacket(success, status, teams);
@@ -93,7 +107,8 @@ public record TeamManagerSyncPacket(
             String leaderName,
             int maxPlayers,
             List<String> roles,
-            List<String> members
+            List<String> members,
+            Map<String, String> memberRoles
     ) {
         public TeamSnapshot {
             name = name == null ? "" : name;
@@ -101,6 +116,7 @@ public record TeamManagerSyncPacket(
             maxPlayers = Math.max(1, maxPlayers);
             roles = List.copyOf(roles == null ? List.of() : roles);
             members = List.copyOf(members == null ? List.of() : members);
+            memberRoles = Map.copyOf(memberRoles == null ? Map.of() : memberRoles);
         }
     }
 }

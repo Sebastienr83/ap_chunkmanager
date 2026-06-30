@@ -18,6 +18,7 @@ public record CreateChunkRulePacket(
         boolean assignRoleToChunk,
     String roleName,
     int roleColorRgb,
+        String assignedTeamName,
         boolean requireTeam,
         int buildHeightAboveFace,
         int buildDepthBelowFace,
@@ -33,6 +34,7 @@ public record CreateChunkRulePacket(
     public CreateChunkRulePacket {
         name = name == null ? "" : name;
         roleName = roleName == null ? "" : roleName;
+        assignedTeamName = assignedTeamName == null ? "" : assignedTeamName;
     rewardResource = rewardResource == null ? "minecraft:air" : rewardResource;
     costResource = costResource == null ? "minecraft:air" : costResource;
         selectedChunks = List.copyOf(selectedChunks == null ? List.of() : selectedChunks);
@@ -43,6 +45,7 @@ public record CreateChunkRulePacket(
         buffer.writeBoolean(message.assignRoleToChunk);
         buffer.writeUtf(message.roleName, 64);
         buffer.writeInt(message.roleColorRgb);
+        buffer.writeUtf(message.assignedTeamName, 64);
         buffer.writeBoolean(message.requireTeam);
         buffer.writeVarInt(message.buildHeightAboveFace);
         buffer.writeVarInt(message.buildDepthBelowFace);
@@ -66,6 +69,7 @@ public record CreateChunkRulePacket(
         boolean assignRoleToChunk = buffer.readBoolean();
         String roleName = buffer.readUtf(64);
         int roleColorRgb = buffer.readInt();
+        String assignedTeamName = buffer.readUtf(64);
         boolean requireTeam = buffer.readBoolean();
         int buildHeightAboveFace = buffer.readVarInt();
         int buildDepthBelowFace = buffer.readVarInt();
@@ -88,6 +92,7 @@ public record CreateChunkRulePacket(
                 assignRoleToChunk,
                 roleName,
                 roleColorRgb,
+                assignedTeamName,
                 requireTeam,
                 buildHeightAboveFace,
                 buildDepthBelowFace,
